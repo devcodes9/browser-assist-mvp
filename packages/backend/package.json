@@ -1,0 +1,29 @@
+{
+  "name": "@browser-assist/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc && node scripts/copy-shared.js",
+    "start": "node dist/server.js",
+    "type-check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.5",
+    "@ai-sdk/azure": "^1.0.5",
+    "@ai-sdk/openai": "^1.0.7",
+    "@browser-assist/shared": "*",
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "ai": "^4.0.38",
+    "dotenv": "^16.4.7",
+    "ws": "^8.18.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "browser-assist-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser-based AI agent MVP with Chrome Extension and AI SDK backend",
+  "workspaces": [
+    "packages/*",
+    "shared"
+  ],
+  "scripts": {
+    "dev:extension": "npm run dev --workspace=packages/extension",
+    "dev:backend": "npm run dev --workspace=packages/backend",
+    "build:extension": "npm run build --workspace=packages/extension",
+    "build:backend": "npm run build --workspace=packages/backend",
+    "build": "npm run build:extension && npm run build:backend",
+    "type-check": "npm run type-check --workspaces --if-present"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
