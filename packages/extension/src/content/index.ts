@@ -52,6 +52,27 @@ async function executeCommand(command: BrowserCommand): Promise<CommandResult> {
     case 'discover':
       return executeDiscover(command.id);
 
+    case 'get_page_structure':
+      return executeGetPageStructure(command.id);
+
+    case 'extract_table':
+      return executeExtractTable(command.id, command.selector);
+
+    case 'extract_links':
+      return executeExtractLinks(command.id);
+
+    case 'get_form_fields':
+      return executeGetFormFields(command.id);
+
+    case 'scroll_to':
+      return executeScrollTo(command.id, command.target);
+
+    case 'search_page':
+      return executeSearchPage(command.id, command.query);
+
+    case 'eval':
+      return executeEval(command.id, command.code);
+
     default:
       throw new Error(`Unknown command type: ${(command as any).type}`);
   }
@@ -404,4 +425,158 @@ function generateUniqueSelector(element: HTMLElement, fallbackIndex: number): st
   }
 
   return path.join(' > ') || `[data-discover-index="${fallbackIndex}"]`;
+}
+
+// Get page structure (outline)
+async function executeGetPageStructure(id: string): Promise<CommandResult> {
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6, nav, main, article, section, footer, header'));
+    const outline = headings.map(el => {
+        const tag = el.tagName.toLowerCase();
+        const text = el.textContent?.trim().slice(0, 100) || '';
+        const id = el.id ? `#${el.id}` : '';
+        const role = el.getAttribute('role') || '';
+        return { tag, text, id, role };
+    }).filter(item => item.text.length > 0 || item.tag === 'nav' || item.tag === 'main');
+
+    return {
+        id,
+        success: true,
+        data: { outline, title: document.title, url: window.location.href }
+    };
+}
+
+// Extract table data
+async function executeExtractTable(id: string, selector: string): Promise<CommandResult> {
+    const table = document.querySelector(selector);
+    if (!table || table.tagName !== 'TABLE') {
+        throw new Error(`Element is not a table: ${selector}`);
+    }
+
+    const rows = Array.from((table as HTMLTableElement).rows);
+    const data = rows.map(row =>
+        Array.from(row.cells).map(cell => cell.textContent?.trim() || '')
+    );
+
+    return {
+        id,
+        success: true,
+        data: { table: data }
+    };
+}
+
+// Extract links with context
+async function executeExtractLinks(id: string): Promise<CommandResult> {
+    const links = Array.from(document.querySelectorAll('a[href]'));
+    const extracted = links.map(link => {
+        const el = link as HTMLAnchorElement;
+        // Get surrounding text (naive approach: parent text)
+        const context = el.parentElement?.textContent?.slice(0, 200).replace(/\s+/g, ' ').trim() || '';
+        return {
+            text: el.textContent?.trim() || '',
+            href: el.href,
+            context: context !== el.textContent?.trim() ? context : undefined
+        };
+    }).filter(l => l.text.length > 0 && !l.href.startsWith('javascript:'));
+
+    // Deduplicate by href
+    const unique = Array.from(new Map(extracted.map(item => [item.href, item])).values());
+
+    return {
+        id,
+        success: true,
+        data: { links: unique.slice(0, 100) } // Limit to 100
+    };
+}
+
+// Get form fields
+async function executeGetFormFields(id: string): Promise<CommandResult> {
+    const inputs = Array.from(document.querySelectorAll('input, select, textarea, button[type="submit"]'));
+    const fields = inputs.map(el => {
+        const element = el as HTMLElement;
+        let label = '';
+
+        // Try to find label
+        if (element.id) {
+            const labelEl = document.querySelector(`label[for="${element.id}"]`);
+            if (labelEl) label = labelEl.textContent?.trim() || '';
+        }
+        if (!label && element.closest('label')) {
+            label = element.closest('label')?.textContent?.trim() || '';
+        }
+        if (!label) {
+            label = element.getAttribute('aria-label') || element.getAttribute('placeholder') || element.getAttribute('name') || '';
+        }
+
+        return {
+            tag: element.tagName.toLowerCase(),
+            type: element.getAttribute('type'),
+            name: element.getAttribute('name'),
+            id: element.id,
+            label: label.slice(0, 100),
+            value: (element as any).value || ''
+        };
+    });
+
+    return {
+        id,
+        success: true,
+        data: { fields }
+    };
+}
+
+// Scroll to target
+async function executeScrollTo(id: string, target: string): Promise<CommandResult> {
+    if (target === 'top') {
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    } else if (target === 'bottom') {
+        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+    } else {
+        const element = document.querySelector(target);
+        if (!element) throw new Error(`Element not found: ${target}`);
+        element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+
+    // Wait for scroll
+    await new Promise(r => setTimeout(r, 500));
+
+    return {
+        id,
+        success: true,
+        data: { scrolledTo: target, scrollY: window.scrollY }
+    };
+}
+
+// Search page
+async function executeSearchPage(id: string, query: string): Promise<CommandResult> {
+    // Case insensitive text search in body
+    const bodyText = document.body.innerText;
+    const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+    const matches = (bodyText.match(regex) || []).length;
+
+    return {
+        id,
+        success: true,
+        data: { query, matches }
+    };
+}
+
+// Execute arbitrary JS
+async function executeEval(id: string, code: string): Promise<CommandResult> {
+    try {
+        // Basic safety: avoid infinite loops if possible, but eval is inherently unsafe
+        // Run in new Function wrapper to isolate scope slightly
+        const func = new Function(code);
+        const result = func();
+
+        // Handle promises if code returns a promise
+        const resolved = result instanceof Promise ? await result : result;
+
+        return {
+            id,
+            success: true,
+            data: { result: resolved }
+        };
+    } catch (error) {
+        throw new Error(`Eval failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
 }
