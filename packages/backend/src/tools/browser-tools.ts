@@ -251,6 +251,127 @@ export function createBrowserTools(options: BrowserToolsOptions) {
       },
     }),
 
+
+    get_page_structure: tool({
+      description:
+        'Get a structured outline of the page (headings, landmarks, sections) to understand the content hierarchy without reading the full DOM.',
+      parameters: z.object({}),
+      execute: async () => {
+        const command: BrowserCommand = {
+          type: 'get_page_structure',
+          id: `struct-${Date.now()}`,
+        };
+        const result = await executeCommand(command);
+        return result;
+      },
+    }),
+
+    extract_table: tool({
+      description: 'Extract data from an HTML table into structured JSON.',
+      parameters: z.object({
+        selector: z.string().describe('CSS selector for the table element'),
+      }),
+      execute: async ({ selector }) => {
+        const command: BrowserCommand = {
+          type: 'extract_table',
+          id: `tbl-${Date.now()}`,
+          selector,
+        };
+        const result = await executeCommand(command);
+        return result;
+      },
+    }),
+
+    extract_links: tool({
+      description:
+        'Extract all links from the page with their context (surrounding text) to help decide where to navigate next.',
+      parameters: z.object({}),
+      execute: async () => {
+        const command: BrowserCommand = {
+          type: 'extract_links',
+          id: `lnks-${Date.now()}`,
+        };
+        const result = await executeCommand(command);
+        return result;
+      },
+    }),
+
+    get_form_fields: tool({
+      description:
+        'Identify all form fields, labels, and their relationships to understand what information is requested.',
+      parameters: z.object({}),
+      execute: async () => {
+        const command: BrowserCommand = {
+          type: 'get_form_fields',
+          id: `form-${Date.now()}`,
+        };
+        const result = await executeCommand(command);
+        return result;
+      },
+    }),
+
+    scroll_to: tool({
+      description:
+        'Scroll the page to a specific element or position ("top", "bottom"). Useful to reveal lazy-loaded content.',
+      parameters: z.object({
+        target: z.string().describe('CSS selector or "top" or "bottom"'),
+      }),
+      execute: async ({ target }) => {
+        const command: BrowserCommand = {
+          type: 'scroll_to',
+          id: `scr-${Date.now()}`,
+          target,
+        };
+        const result = await executeCommand(command);
+        return result;
+      },
+    }),
+
+    search_page: tool({
+      description:
+        'Search for text or elements matching a query on the page. Returns match counts and locations.',
+      parameters: z.object({
+        query: z.string().describe('Text to search for'),
+      }),
+      execute: async ({ query }) => {
+        const command: BrowserCommand = {
+          type: 'search_page',
+          id: `srch-${Date.now()}`,
+          query,
+        };
+        const result = await executeCommand(command);
+        return result;
+      },
+    }),
+
+    eval_on_page: tool({
+      description:
+        'Execute custom JavaScript on the page. Use this for complex data extraction, checking state, or logic that cannot be done with other tools. NOTE: This requires permission/approval.',
+      parameters: z.object({
+        code: z
+          .string()
+          .describe('JavaScript code to execute. The last expression will be returned.'),
+      }),
+      execute: async ({ code }) => {
+        const command: BrowserCommand = {
+          type: 'eval',
+          id: `eval-${Date.now()}`,
+          code,
+        };
+
+        const approved = await requestPermission(
+          command,
+          `Execute JavaScript on page: ${code.slice(0, 50)}...`
+        );
+        if (!approved) {
+          return { success: false, error: 'Permission denied by user' };
+        }
+
+        const result = await executeCommand(command);
+        return result;
+      },
+    }),
+
     show_plan: tool({
       description:
         'Show a plan to the user and wait for approval before executing actions. Call this FIRST before taking any actions. Once approved, all subsequent navigate/click/type actions will auto-execute without asking. Call again if you need to deviate from the original plan.',

@@ -14,7 +14,14 @@ export type BrowserCommand =
   | ExtractCommand
   | SnapshotCommand
   | DiscoverCommand
-  | ScreenshotCommand;
+  | ScreenshotCommand
+  | GetPageStructureCommand
+  | ExtractTableCommand
+  | ExtractLinksCommand
+  | GetFormFieldsCommand
+  | ScrollToCommand
+  | SearchPageCommand
+  | EvalCommand;
 
 export interface NavigateCommand {
   type: 'navigate';
@@ -54,6 +61,45 @@ export interface DiscoverCommand {
 export interface ScreenshotCommand {
   type: 'screenshot';
   id: string;
+}
+
+export interface GetPageStructureCommand {
+  type: 'get_page_structure';
+  id: string;
+}
+
+export interface ExtractTableCommand {
+  type: 'extract_table';
+  id: string;
+  selector: string;
+}
+
+export interface ExtractLinksCommand {
+  type: 'extract_links';
+  id: string;
+}
+
+export interface GetFormFieldsCommand {
+  type: 'get_form_fields';
+  id: string;
+}
+
+export interface ScrollToCommand {
+  type: 'scroll_to';
+  id: string;
+  target: string | 'top' | 'bottom';
+}
+
+export interface SearchPageCommand {
+  type: 'search_page';
+  id: string;
+  query: string;
+}
+
+export interface EvalCommand {
+  type: 'eval';
+  id: string;
+  code: string;
 }
 
 // ============================================================================
