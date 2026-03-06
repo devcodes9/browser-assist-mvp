@@ -18,8 +18,20 @@ Browser Assist AI is an npm workspace monorepo (`packages/backend`, `packages/ex
 
 The backend reads AI provider config from environment variables (see `packages/backend/.env.example`). Required secrets: `AI_PROVIDER`, plus the corresponding API key (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `AZURE_API_KEY` + `AZURE_RESOURCE_NAME` + `AZURE_DEPLOYMENT`). These are injected as env vars in the Cloud Agent environment; `dotenv` will not override existing process env vars, so the `.env` file serves as fallback only.
 
+### Chrome Extension (UI)
+
+- **Build**: `npm run build:extension` (tsc + vite build + manifest copy)
+- **Dev watch**: `npm run dev:extension` (vite build --watch, rebuilds on changes)
+- **Type-check**: `npm run type-check --workspace=packages/extension`
+- After building, load as unpacked extension in Chrome from `packages/extension/dist/`
+- The extension is a Manifest V3 Chrome Extension with React side panel UI
+- It connects to the backend over WebSocket at `ws://localhost:8080` (configured in `packages/extension/src/shared/config.ts`)
+- To test the full flow: start backend (`npm run dev:backend`), build extension, load in Chrome, navigate to any page, open the side panel, and send a message
+
 ### Gotchas
 
 - The `shared/` package (`@browser-assist/shared`) is a workspace dependency referenced by `"main": "./types.ts"` — it ships raw `.ts` files consumed directly by `tsx` in dev mode, but the build step runs `scripts/copy-shared.js` to copy types into `dist/`.
 - No ESLint or Prettier is configured; `tsc --noEmit` (via `npm run type-check`) is the only static analysis available.
 - The project uses `package-lock.json` → always use `npm` (not pnpm/yarn).
+- The extension `dev` mode (`vite build --watch`) only rebuilds files — you must still manually reload the extension in `chrome://extensions/` after changes.
+- The extension depends on Chrome APIs (`chrome.tabs`, `chrome.runtime`, etc.) and cannot be tested as a standalone web page.
