@@ -24,6 +24,7 @@ interface PlanRequest {
 
 interface AgentCallbacks {
   onMessage: (content: string, streaming?: boolean, done?: boolean) => void;
+  onStatus: (status: 'thinking' | 'tool_call' | 'tool_result' | 'idle' | 'error', toolName?: string, toolArgs?: Record<string, unknown>, summary?: string) => void;
   onCommandRequest: (command: BrowserCommand) => void;
   onPermissionRequest: (command: BrowserCommand, description: string) => void;
   onPlanRequest: (plan: PlanRequest) => void;
@@ -44,11 +45,32 @@ interface PendingPlan {
   reject: (error: Error) => void;
 }
 
+// Human-readable labels for tool calls shown in the UI
+const TOOL_LABELS: Record<string, string> = {
+  navigate: 'Navigating',
+  click: 'Clicking element',
+  type: 'Typing text',
+  extract: 'Extracting content',
+  snapshot: 'Reading page',
+  discover: 'Finding interactive elements',
+  screenshot: 'Taking screenshot',
+  get_page_structure: 'Analyzing page structure',
+  extract_table: 'Extracting table data',
+  extract_links: 'Extracting links',
+  get_form_fields: 'Analyzing form fields',
+  scroll_to: 'Scrolling',
+  search_page: 'Searching page',
+  eval_on_page: 'Running JavaScript',
+  wait_for_element: 'Waiting for element',
+  show_plan: 'Proposing plan',
+};
+
 export function createAgent(options: {
   config: AgentConfig;
   conversationHistory: ConversationMessage[];
   isPlanApproved: () => boolean;
   onMessage: AgentCallbacks['onMessage'];
+  onStatus: AgentCallbacks['onStatus'];
   onCommandRequest: AgentCallbacks['onCommandRequest'];
   onPermissionRequest: AgentCallbacks['onPermissionRequest'];
   onPlanRequest: AgentCallbacks['onPlanRequest'];
@@ -58,20 +80,18 @@ export function createAgent(options: {
     conversationHistory,
     isPlanApproved,
     onMessage,
+    onStatus,
     onCommandRequest,
     onPermissionRequest,
     onPlanRequest,
   } = options;
 
-  // Pending command/permission/plan promises
   const pendingCommands = new Map<string, PendingCommand>();
   const pendingPermissions = new Map<string, PendingPermission>();
   const pendingPlans = new Map<string, PendingPlan>();
 
-  // Get AI model based on config
   const model = getModel(config);
 
-  // Create browser tools
   const browserTools = createBrowserTools({
     onCommandRequest,
     onPermissionRequest,
@@ -82,20 +102,19 @@ export function createAgent(options: {
     isPlanApproved,
   });
 
-  // Load MCP tools (if configured)
   const mcpTools = loadMCPTools();
 
-  // Combine all tools
   const tools = {
     ...browserTools,
     ...mcpTools,
   };
 
-  // System prompt (constant across conversation)
   const systemPrompt = `You are a browser automation assistant. You help users automate browser tasks.
 
 You have access to browser control tools:
-- show_plan(plan, summary): ALWAYS call this FIRST to show your plan and get user approval
+- show_plan(plan, summary): Show your plan and get user approval before performing actions.
+- get_page_structure(): Get page outline (headings, landmarks, sections)
+- extract_links(): Get all links with surrounding context
 - discover(): Find all interactive elements with CSS selectors
 - navigate(url): Navigate to a URL
 - click(selector): Click an element
@@ -103,64 +122,67 @@ You have access to browser control tools:
 - extract(selector): Extract content from an element
 - snapshot(): Get current page text content
 - screenshot(): Take a screenshot (for vision models)
+- search_page(query): Search for text on the page
+- scroll_to(target): Scroll to element or position ("top", "bottom")
+- wait_for_element(selector, timeout): Wait for an element to appear (useful after navigation)
+- get_form_fields(): Identify all form fields and labels
+- extract_table(selector): Extract table data as structured JSON
+- eval_on_page(code): Execute custom JavaScript on the page
 
-CRITICAL WORKFLOW:
-1. When user asks for a task, FIRST call show_plan() with your planned steps
-2. Wait for approval before taking any actions
-3. Once approved, execute your plan - actions will auto-approve
-4. If you need to deviate significantly from the plan, call show_plan() again
+WORKFLOW:
+1. UNDERSTAND: Use read-only tools first (get_page_structure, extract_links, discover, search_page) to understand the page.
+2. PLAN: Call show_plan() with specific, verified steps before taking state-changing actions.
+3. EXECUTE: After approval, execute the steps. Actions auto-approve if they match the plan.
+4. ADAPT: If something fails or context changes, gather new info and call show_plan() again.
 
-Example:
-User: "Add a todo item"
-You: Call show_plan(["Navigate to todo app", "Click add button", "Type 'Buy groceries'"], "Add a new todo item")
-[After approval] Execute the steps
-
-Guidelines:
-- Always show plan first for multi-step tasks
-- Use discover() to get selectors before clicking
-- Call show_plan() again if encountering unexpected situations
-- Remember previous actions in this conversation`;
+KEY PRINCIPLES:
+- Always gather context before acting. Never guess selectors.
+- After navigation, use wait_for_element() or snapshot() to confirm the page loaded.
+- Be specific in plans: "Click button #submit-order" not "Click the button".
+- For simple direct requests (e.g., "go to google.com"), you can plan immediately.
+- If a command fails, diagnose why (element not found? page not loaded? wrong selector?) and retry intelligently.
+- Keep responses concise. Report what you did and what you found, not your internal reasoning.`;
 
   return {
     async run(userMessage: string) {
       try {
-        console.log('🤖 Running agent with message:', userMessage);
-        console.log('📜 Conversation history length:', conversationHistory.length);
-
-        // Build messages from conversation history + current message
         const messages = [
-          // Include previous conversation for context
           ...conversationHistory.map((msg) => ({
             role: msg.role as 'user' | 'assistant',
             content: msg.content,
           })),
-          // Add current user message
           {
             role: 'user' as const,
             content: userMessage,
           },
         ];
 
-        // Use generateText with conversation history
         const result = await generateText({
           model,
           system: systemPrompt,
           messages,
           tools,
           maxSteps: config.maxSteps,
+          onStepFinish: ({ toolCalls, toolResults }) => {
+            if (toolCalls && toolCalls.length > 0) {
+              for (const tc of toolCalls) {
+                const label = TOOL_LABELS[tc.toolName] || tc.toolName;
+                onStatus('tool_call', tc.toolName, tc.args as Record<string, unknown>, label);
+              }
+            }
+            if (toolResults && toolResults.length > 0) {
+              onStatus('thinking');
+            }
+          },
         });
 
-        // Send final response
         onMessage(result.text, false, true);
-
-        console.log('✓ Agent finished');
       } catch (error) {
         console.error('Agent execution failed:', error);
         throw error;
       }
     },
 
-    // Handle command response from extension
     handleCommandResponse(result: CommandResult) {
       const pending = pendingCommands.get(result.id);
       if (pending) {
@@ -173,7 +195,6 @@ Guidelines:
       }
     },
 
-    // Handle permission response from user
     handlePermissionResponse(commandId: string, approved: boolean) {
       const pending = pendingPermissions.get(commandId);
       if (pending) {
@@ -182,7 +203,6 @@ Guidelines:
       }
     },
 
-    // Handle plan approval response from user
     handlePlanResponse(planId: string, approved: boolean, feedback?: string) {
       const pending = pendingPlans.get(planId);
       if (pending) {
@@ -193,7 +213,6 @@ Guidelines:
   };
 }
 
-// Get AI model instance based on config
 function getModel(config: AgentConfig) {
   switch (config.provider) {
     case 'anthropic': {
@@ -211,13 +230,11 @@ function getModel(config: AgentConfig) {
     }
 
     case 'azure': {
-      // Azure OpenAI
       const azure = createAzure({
         apiKey: config.apiKey,
         resourceName: config.azureResourceName!,
         apiVersion: config.azureApiVersion,
       });
-      // Use the deployment name
       return azure(config.azureDeployment || config.model);
     }
 

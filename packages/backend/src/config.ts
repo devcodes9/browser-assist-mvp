@@ -42,7 +42,7 @@ export function loadConfig(): AgentConfig {
     provider,
     model,
     apiKey,
-    maxSteps: parseInt(process.env.MAX_STEPS || '10'),
+    maxSteps: parseInt(process.env.MAX_STEPS || '25'),
   };
 
   // Add Azure-specific configuration

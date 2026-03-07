@@ -15,7 +15,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
     executeCommand(command)
       .then((result) => {
-        console.log('[Content] Command completed:', result);
+        console.log('[Content] Command completed:', result.success);
         sendResponse(result);
       })
       .catch((error) => {
@@ -36,22 +36,32 @@ async function executeCommand(command: BrowserCommand): Promise<CommandResult> {
   switch (command.type) {
     case 'navigate':
       return executeNavigate(command.id, command.url);
-
     case 'click':
       return executeClick(command.id, command.selector);
-
     case 'type':
       return executeType(command.id, command.selector, command.text);
-
     case 'extract':
       return executeExtract(command.id, command.selector);
-
     case 'snapshot':
       return executeSnapshot(command.id);
-
     case 'discover':
       return executeDiscover(command.id);
-
+    case 'get_page_structure':
+      return executeGetPageStructure(command.id);
+    case 'extract_table':
+      return executeExtractTable(command.id, command.selector);
+    case 'extract_links':
+      return executeExtractLinks(command.id);
+    case 'get_form_fields':
+      return executeGetFormFields(command.id);
+    case 'scroll_to':
+      return executeScrollTo(command.id, command.target);
+    case 'search_page':
+      return executeSearchPage(command.id, command.query);
+    case 'eval':
+      return executeEval(command.id, command.code);
+    case 'wait_for_element':
+      return executeWaitForElement(command.id, command.selector, command.timeout);
     default:
       throw new Error(`Unknown command type: ${(command as any).type}`);
   }
@@ -60,18 +70,10 @@ async function executeCommand(command: BrowserCommand): Promise<CommandResult> {
 // Navigate to URL
 async function executeNavigate(id: string, url: string): Promise<CommandResult> {
   try {
-    // Validate URL
     new URL(url);
-
-    // Navigate via location
     window.location.href = url;
-
-    return {
-      id,
-      success: true,
-      data: { url },
-    };
-  } catch (error) {
+    return { id, success: true, data: { url } };
+  } catch {
     throw new Error(`Invalid URL: ${url}`);
   }
 }
@@ -88,20 +90,11 @@ async function executeClick(id: string, selector: string): Promise<CommandResult
     throw new Error(`Element is not clickable: ${selector}`);
   }
 
-  // Scroll element into view
   element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-  // Wait a bit for scroll
   await new Promise((resolve) => setTimeout(resolve, 300));
-
-  // Click
   element.click();
 
-  return {
-    id,
-    success: true,
-    data: { selector },
-  };
+  return { id, success: true, data: { selector } };
 }
 
 // Type text into element
@@ -118,53 +111,49 @@ async function executeType(
 
   if (
     !(element instanceof HTMLInputElement) &&
-    !(element instanceof HTMLTextAreaElement)
+    !(element instanceof HTMLTextAreaElement) &&
+    !element.getAttribute('contenteditable')
   ) {
     throw new Error(`Element is not typeable: ${selector}`);
   }
 
-  // Scroll element into view
   element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-
-  // Wait a bit for scroll
   await new Promise((resolve) => setTimeout(resolve, 300));
 
-  // Focus
-  element.focus();
+  (element as HTMLElement).focus();
 
-  // Clear existing value
-  element.value = '';
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    // Use native setter for React/framework compatibility
+    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    )?.set || Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype, 'value'
+    )?.set;
 
-  // Type text (simulate typing for better compatibility)
-  for (let i = 0; i < text.length; i++) {
-    element.value += text[i];
+    if (nativeInputValueSetter) {
+      nativeInputValueSetter.call(element, text);
+    } else {
+      element.value = text;
+    }
 
-    // Dispatch input event
     element.dispatchEvent(new Event('input', { bubbles: true }));
-
-    // Small delay between characters
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  } else {
+    // contenteditable
+    (element as HTMLElement).textContent = text;
+    element.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
-  // Dispatch change event
-  element.dispatchEvent(new Event('change', { bubbles: true }));
-
-  return {
-    id,
-    success: true,
-    data: { selector, text },
-  };
+  return { id, success: true, data: { selector, text } };
 }
 
 // Extract content from element
 async function executeExtract(id: string, selector: string): Promise<CommandResult> {
   const element = document.querySelector(selector);
-
   if (!element) {
     throw new Error(`Element not found: ${selector}`);
   }
 
-  // Extract text content and relevant attributes
   const data = {
     text: element.textContent?.trim() || '',
     html: element.innerHTML,
@@ -172,7 +161,6 @@ async function executeExtract(id: string, selector: string): Promise<CommandResu
     attributes: {} as Record<string, string>,
   };
 
-  // Common useful attributes
   const attrs = ['id', 'class', 'href', 'src', 'alt', 'title', 'value', 'placeholder'];
   for (const attr of attrs) {
     const value = element.getAttribute(attr);
@@ -181,61 +169,38 @@ async function executeExtract(id: string, selector: string): Promise<CommandResu
     }
   }
 
-  return {
-    id,
-    success: true,
-    data,
-  };
+  return { id, success: true, data };
 }
 
 // Take snapshot of page
 async function executeSnapshot(id: string): Promise<CommandResult> {
-  const data = {
-    url: window.location.href,
-    title: document.title,
-    // Get main content (try common content selectors)
-    content: extractPageContent(),
-    metadata: {
-      viewport: {
-        width: window.innerWidth,
-        height: window.innerHeight,
-      },
-      scroll: {
-        x: window.scrollX,
-        y: window.scrollY,
-      },
-    },
-  };
-
   return {
     id,
     success: true,
-    data,
+    data: {
+      url: window.location.href,
+      title: document.title,
+      content: extractPageContent(),
+      metadata: {
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+        scroll: { x: window.scrollX, y: window.scrollY },
+      },
+    },
   };
 }
 
-// Extract main page content
 function extractPageContent(): string {
-  // Try common content selectors
-  const selectors = [
-    'main',
-    'article',
-    '[role="main"]',
-    '#content',
-    '.content',
-    'body',
-  ];
+  const selectors = ['main', 'article', '[role="main"]', '#content', '.content', 'body'];
 
   for (const selector of selectors) {
     const element = document.querySelector(selector);
     if (element) {
-      // Get text content, cleaned up
       const text = element.textContent || '';
-      return text.replace(/\s+/g, ' ').trim();
+      return text.replace(/\s+/g, ' ').trim().slice(0, 10000);
     }
   }
 
-  return document.body.textContent?.replace(/\s+/g, ' ').trim() || '';
+  return document.body.textContent?.replace(/\s+/g, ' ').trim().slice(0, 10000) || '';
 }
 
 // Discover all interactive elements on the page
@@ -280,7 +245,6 @@ async function executeDiscover(id: string): Promise<CommandResult> {
     const rect = el.getBoundingClientRect();
     const style = window.getComputedStyle(el);
 
-    // Check visibility
     const isVisible =
       style.display !== 'none' &&
       style.visibility !== 'hidden' &&
@@ -290,21 +254,16 @@ async function executeDiscover(id: string): Promise<CommandResult> {
 
     if (!isVisible) return;
 
-    // Check if in viewport
     const isInViewport =
       rect.top < viewportHeight &&
       rect.bottom > 0 &&
       rect.left < viewportWidth &&
       rect.right > 0;
 
-    // Generate unique selector
     const selector = generateUniqueSelector(el, index);
-
-    // Skip duplicates
     if (seenSelectors.has(selector)) return;
     seenSelectors.add(selector);
 
-    // Get element text
     const text =
       el.getAttribute('aria-label') ||
       el.getAttribute('alt') ||
@@ -313,7 +272,6 @@ async function executeDiscover(id: string): Promise<CommandResult> {
       el.getAttribute('placeholder') ||
       '';
 
-    // Gather relevant attributes
     const attributes: Record<string, string> = {};
     const attrNames = ['href', 'src', 'alt', 'title', 'placeholder', 'value', 'name', 'id', 'class'];
     for (const attr of attrNames) {
@@ -352,20 +310,16 @@ async function executeDiscover(id: string): Promise<CommandResult> {
   };
 }
 
-// Generate unique CSS selector for an element
 function generateUniqueSelector(element: HTMLElement, fallbackIndex: number): string {
-  // Try ID first (most reliable)
   if (element.id) {
     return `#${CSS.escape(element.id)}`;
   }
 
-  // Try data-testid (common in React apps)
   const testId = element.getAttribute('data-testid') || element.getAttribute('data-test-id');
   if (testId) {
     return `[data-testid="${CSS.escape(testId)}"]`;
   }
 
-  // Try unique class combination
   if (element.className && typeof element.className === 'string') {
     const classes = element.className.split(/\s+/).filter((c) => c.length > 0 && !c.startsWith('_'));
     if (classes.length > 0) {
@@ -376,7 +330,6 @@ function generateUniqueSelector(element: HTMLElement, fallbackIndex: number): st
     }
   }
 
-  // Build path with nth-of-type
   const path: string[] = [];
   let current: HTMLElement | null = element;
 
@@ -404,4 +357,198 @@ function generateUniqueSelector(element: HTMLElement, fallbackIndex: number): st
   }
 
   return path.join(' > ') || `[data-discover-index="${fallbackIndex}"]`;
+}
+
+// Get page structure (outline)
+async function executeGetPageStructure(id: string): Promise<CommandResult> {
+  const headings = Array.from(
+    document.querySelectorAll('h1, h2, h3, h4, h5, h6, nav, main, article, section, footer, header')
+  );
+  const outline = headings
+    .map((el) => {
+      const tag = el.tagName.toLowerCase();
+      const text = el.textContent?.trim().slice(0, 100) || '';
+      const elId = el.id ? `#${el.id}` : '';
+      const role = el.getAttribute('role') || '';
+      return { tag, text, id: elId, role };
+    })
+    .filter((item) => item.text.length > 0 || item.tag === 'nav' || item.tag === 'main');
+
+  return {
+    id,
+    success: true,
+    data: { outline, title: document.title, url: window.location.href },
+  };
+}
+
+// Extract table data
+async function executeExtractTable(id: string, selector: string): Promise<CommandResult> {
+  const table = document.querySelector(selector);
+  if (!table || table.tagName !== 'TABLE') {
+    throw new Error(`Element is not a table: ${selector}`);
+  }
+
+  const rows = Array.from((table as HTMLTableElement).rows);
+  const data = rows.map((row) =>
+    Array.from(row.cells).map((cell) => cell.textContent?.trim() || '')
+  );
+
+  return { id, success: true, data: { table: data } };
+}
+
+// Extract links with context
+async function executeExtractLinks(id: string): Promise<CommandResult> {
+  const links = Array.from(document.querySelectorAll('a[href]'));
+  const extracted = links
+    .map((link) => {
+      const el = link as HTMLAnchorElement;
+      const context = el.parentElement?.textContent?.slice(0, 200).replace(/\s+/g, ' ').trim() || '';
+      return {
+        text: el.textContent?.trim() || '',
+        href: el.href,
+        context: context !== el.textContent?.trim() ? context : undefined,
+      };
+    })
+    .filter((l) => l.text.length > 0 && !l.href.startsWith('javascript:'));
+
+  const unique = Array.from(new Map(extracted.map((item) => [item.href, item])).values());
+
+  return { id, success: true, data: { links: unique.slice(0, 100) } };
+}
+
+// Get form fields
+async function executeGetFormFields(id: string): Promise<CommandResult> {
+  const inputs = Array.from(
+    document.querySelectorAll('input, select, textarea, button[type="submit"]')
+  );
+  const fields = inputs.map((el) => {
+    const element = el as HTMLElement;
+    let label = '';
+
+    if (element.id) {
+      const labelEl = document.querySelector(`label[for="${element.id}"]`);
+      if (labelEl) label = labelEl.textContent?.trim() || '';
+    }
+    if (!label && element.closest('label')) {
+      label = element.closest('label')?.textContent?.trim() || '';
+    }
+    if (!label) {
+      label =
+        element.getAttribute('aria-label') ||
+        element.getAttribute('placeholder') ||
+        element.getAttribute('name') ||
+        '';
+    }
+
+    return {
+      tag: element.tagName.toLowerCase(),
+      type: element.getAttribute('type'),
+      name: element.getAttribute('name'),
+      id: element.id,
+      label: label.slice(0, 100),
+      value: (element as any).value || '',
+    };
+  });
+
+  return { id, success: true, data: { fields } };
+}
+
+// Scroll to target
+async function executeScrollTo(id: string, target: string): Promise<CommandResult> {
+  if (target === 'top') {
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  } else if (target === 'bottom') {
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+  } else {
+    const element = document.querySelector(target);
+    if (!element) throw new Error(`Element not found: ${target}`);
+    element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  await new Promise((r) => setTimeout(r, 500));
+
+  return { id, success: true, data: { scrolledTo: target, scrollY: window.scrollY } };
+}
+
+// Search page with context snippets
+async function executeSearchPage(id: string, query: string): Promise<CommandResult> {
+  const bodyText = document.body.innerText;
+  const regex = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  const matches = (bodyText.match(regex) || []).length;
+
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  const contexts: string[] = [];
+  let node;
+  while ((node = walker.nextNode()) && contexts.length < 5) {
+    if (node.textContent && regex.test(node.textContent)) {
+      const parent = node.parentElement;
+      if (parent) {
+        contexts.push(parent.textContent?.trim().slice(0, 150) || '');
+      }
+      regex.lastIndex = 0;
+    }
+  }
+
+  return {
+    id,
+    success: true,
+    data: { query, matches, contexts: [...new Set(contexts)] },
+  };
+}
+
+// Execute JavaScript on the page
+// NOTE: This is an intentional feature for the AI agent to run arbitrary JS
+// on the user's behalf. It requires explicit user permission via the plan/permission system.
+async function executeEval(id: string, code: string): Promise<CommandResult> {
+  try {
+    // Using indirect eval to execute user-approved code in global scope
+    const indirectEval = eval;
+    const asyncWrapper = `(async () => { ${code} })()`;
+    const result = await indirectEval(asyncWrapper);
+
+    let serialized: unknown;
+    try {
+      serialized = JSON.parse(JSON.stringify(result));
+    } catch {
+      serialized = String(result);
+    }
+
+    return { id, success: true, data: { result: serialized } };
+  } catch (error) {
+    throw new Error(`Eval failed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+// Wait for element to appear (polling)
+async function executeWaitForElement(
+  id: string,
+  selector: string,
+  timeout: number
+): Promise<CommandResult> {
+  const start = Date.now();
+  const pollInterval = 200;
+
+  while (Date.now() - start < timeout) {
+    const el = document.querySelector(selector);
+    if (el) {
+      return {
+        id,
+        success: true,
+        data: {
+          selector,
+          found: true,
+          elapsed: Date.now() - start,
+          tagName: el.tagName.toLowerCase(),
+          text: el.textContent?.trim().slice(0, 100) || '',
+        },
+      };
+    }
+    await new Promise((r) => setTimeout(r, pollInterval));
+  }
+
+  return {
+    id,
+    success: false,
+    error: `Element not found after ${timeout}ms: ${selector}`,
+  };
 }

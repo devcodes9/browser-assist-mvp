@@ -9,6 +9,9 @@ import { createAgent } from './agent.js';
 import { loadConfig } from './config.js';
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8080;
+const HEARTBEAT_INTERVAL = 30_000;
+const PONG_TIMEOUT = 10_000;
+const MAX_CONVERSATION_MESSAGES = 20;
 
 // Server state
 const clients = new Map<WebSocket, ClientState>();
@@ -22,16 +25,48 @@ interface ClientState {
   tabId: number | null;
   agent: ReturnType<typeof createAgent> | null;
   conversationHistory: ConversationMessage[];
-  planApproved: boolean; // When true, all actions auto-approve
+  planApproved: boolean;
+  isAlive: boolean;
+  isProcessing: boolean;
 }
 
 // Initialize WebSocket server
 const wss = new WebSocketServer({ port: PORT });
 
-console.log(`🚀 WebSocket server started on ws://localhost:${PORT}`);
+console.log(`WebSocket server started on ws://localhost:${PORT}`);
+
+// Heartbeat: ping all clients every 30s, terminate if no pong
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    const state = clients.get(ws);
+    if (!state) return;
+
+    if (!state.isAlive) {
+      console.log('Client failed heartbeat, terminating');
+      clients.delete(ws);
+      ws.terminate();
+      return;
+    }
+
+    state.isAlive = false;
+    send(ws, { type: 'heartbeat' });
+
+    // If no pong within timeout, mark dead
+    setTimeout(() => {
+      const s = clients.get(ws);
+      if (s && !s.isAlive) {
+        // Will be cleaned up next heartbeat cycle
+      }
+    }, PONG_TIMEOUT);
+  });
+}, HEARTBEAT_INTERVAL);
+
+wss.on('close', () => {
+  clearInterval(heartbeatInterval);
+});
 
 wss.on('connection', (ws) => {
-  console.log('📱 Extension connected');
+  console.log('Extension connected');
 
   // Initialize client state
   clients.set(ws, {
@@ -39,6 +74,8 @@ wss.on('connection', (ws) => {
     agent: null,
     conversationHistory: [],
     planApproved: false,
+    isAlive: true,
+    isProcessing: false,
   });
 
   ws.on('message', async (data) => {
@@ -52,7 +89,7 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    console.log('📱 Extension disconnected');
+    console.log('Extension disconnected');
     clients.delete(ws);
   });
 
@@ -63,15 +100,13 @@ wss.on('connection', (ws) => {
 
 // Handle incoming messages
 async function handleMessage(ws: WebSocket, message: WSMessage) {
-  console.log('📨 Received:', message.type);
-
   const state = clients.get(ws);
   if (!state) return;
 
   switch (message.type) {
     case 'extension:ready':
       state.tabId = message.tabId;
-      console.log(`✓ Extension ready (tab: ${message.tabId})`);
+      console.log(`Extension ready (tab: ${message.tabId})`);
       break;
 
     case 'user:message':
@@ -79,15 +114,12 @@ async function handleMessage(ws: WebSocket, message: WSMessage) {
       break;
 
     case 'command:response':
-      // Command response from extension
-      // Agent will handle this via pending promises
       if (state.agent) {
         state.agent.handleCommandResponse(message.result);
       }
       break;
 
     case 'permission:response':
-      // Permission response from user
       if (state.agent) {
         state.agent.handlePermissionResponse(
           message.commandId,
@@ -97,7 +129,6 @@ async function handleMessage(ws: WebSocket, message: WSMessage) {
       break;
 
     case 'plan:response':
-      // Plan approval response from user
       if (state.agent) {
         state.agent.handlePlanResponse(
           message.planId,
@@ -106,13 +137,23 @@ async function handleMessage(ws: WebSocket, message: WSMessage) {
         );
         if (message.approved) {
           state.planApproved = true;
-          console.log('✓ Plan approved - subsequent actions will auto-execute');
         }
       }
       break;
 
+    case 'conversation:clear':
+      state.conversationHistory = [];
+      state.planApproved = false;
+      console.log('Conversation cleared');
+      break;
+
+    case 'pong':
+      state.isAlive = true;
+      break;
+
     default:
-      console.warn('Unknown message type:', message);
+      // Ignore unknown message types silently
+      break;
   }
 }
 
@@ -120,6 +161,15 @@ async function handleMessage(ws: WebSocket, message: WSMessage) {
 async function handleUserMessage(ws: WebSocket, message: UserMessageFromExtension) {
   const state = clients.get(ws);
   if (!state) return;
+
+  // Prevent concurrent agent runs
+  if (state.isProcessing) {
+    sendError(ws, 'Agent is still processing the previous request. Please wait.');
+    return;
+  }
+
+  // Reset plan approval for new user message
+  state.planApproved = false;
 
   // Build user message with page context
   const pageContext = message.pageUrl
@@ -133,14 +183,21 @@ async function handleUserMessage(ws: WebSocket, message: UserMessageFromExtensio
     content: userMessageWithContext,
   });
 
+  // Trim conversation to sliding window
+  if (state.conversationHistory.length > MAX_CONVERSATION_MESSAGES) {
+    state.conversationHistory = state.conversationHistory.slice(
+      -MAX_CONVERSATION_MESSAGES
+    );
+  }
+
+  state.isProcessing = true;
+
   try {
-    // Load configuration
     const config = loadConfig();
 
-    // Create agent instance for this session
     const agent = createAgent({
       config,
-      conversationHistory: state.conversationHistory,
+      conversationHistory: state.conversationHistory.slice(0, -1), // Exclude current message (passed separately)
       isPlanApproved: () => state.planApproved,
       onMessage: (content, streaming = false, done = false) => {
         send(ws, {
@@ -149,13 +206,21 @@ async function handleUserMessage(ws: WebSocket, message: UserMessageFromExtensio
           streaming,
           done,
         });
-        // Add assistant response to history when done
         if (done && content) {
           state.conversationHistory.push({
             role: 'assistant',
             content,
           });
         }
+      },
+      onStatus: (status, toolName, toolArgs, summary) => {
+        send(ws, {
+          type: 'agent:status',
+          status,
+          toolName,
+          toolArgs,
+          summary,
+        });
       },
       onCommandRequest: (command) => {
         send(ws, {
@@ -180,15 +245,20 @@ async function handleUserMessage(ws: WebSocket, message: UserMessageFromExtensio
 
     state.agent = agent;
 
-    // Run agent with user message (including page context)
+    // Send thinking status
+    send(ws, { type: 'agent:status', status: 'thinking' });
+
     await agent.run(userMessageWithContext);
 
-    console.log('✓ Agent completed');
+    // Send idle status when done
+    send(ws, { type: 'agent:status', status: 'idle' });
   } catch (error) {
     console.error('Agent error:', error);
+    send(ws, { type: 'agent:status', status: 'error', summary: error instanceof Error ? error.message : 'Agent failed' });
     sendError(ws, error instanceof Error ? error.message : 'Agent failed');
   } finally {
     state.agent = null;
+    state.isProcessing = false;
   }
 }
 
@@ -211,14 +281,16 @@ function sendError(ws: WebSocket, error: string) {
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('\n👋 Shutting down...');
+  console.log('\nShutting down...');
+  clearInterval(heartbeatInterval);
   wss.close(() => {
     process.exit(0);
   });
 });
 
 process.on('SIGTERM', () => {
-  console.log('\n👋 Shutting down...');
+  console.log('\nShutting down...');
+  clearInterval(heartbeatInterval);
   wss.close(() => {
     process.exit(0);
   });

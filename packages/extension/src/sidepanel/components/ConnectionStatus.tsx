@@ -1,28 +1,33 @@
 interface ConnectionStatusProps {
   connected: boolean;
   onReconnect: () => void;
+  onClear: () => void;
+  messageCount: number;
 }
 
 export default function ConnectionStatus({
   connected,
   onReconnect,
+  onClear,
+  messageCount,
 }: ConnectionStatusProps) {
-  if (connected) {
-    return (
-      <div className="connection-status connected">
-        <div className="status-indicator" />
-        <span>Connected</span>
-      </div>
-    );
-  }
-
   return (
-    <div className="connection-status disconnected">
+    <div className={`connection-status ${connected ? 'connected' : 'disconnected'}`}>
       <div className="status-indicator" />
-      <span>Disconnected</span>
-      <button onClick={onReconnect} className="reconnect-button">
-        Reconnect
-      </button>
+      <span>{connected ? 'Connected' : 'Disconnected'}</span>
+
+      <div className="header-actions">
+        {messageCount > 0 && (
+          <button onClick={onClear} className="clear-button" title="Clear conversation">
+            Clear
+          </button>
+        )}
+        {!connected && (
+          <button onClick={onReconnect} className="reconnect-button">
+            Reconnect
+          </button>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,3 +1,5 @@
+import { useState } from 'react';
+
 interface PendingPlan {
   planId: string;
   plan: string[];
@@ -15,6 +17,17 @@ export default function PlanApproval({
   onApprove,
   onReject,
 }: PlanApprovalProps) {
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [feedback, setFeedback] = useState('');
+
+  const handleReject = () => {
+    if (showFeedback && feedback.trim()) {
+      onReject(feedback.trim());
+    } else {
+      onReject();
+    }
+  };
+
   return (
     <div className="permission-gate">
       <div className="permission-overlay" />
@@ -39,10 +52,32 @@ export default function PlanApproval({
           Once approved, all these actions will execute automatically.
         </div>
 
+        {showFeedback && (
+          <div className="plan-feedback">
+            <textarea
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              placeholder="Tell the AI what to change..."
+              className="feedback-input"
+              rows={2}
+              autoFocus
+            />
+          </div>
+        )}
+
         <div className="permission-actions">
-          <button onClick={() => onReject()} className="deny-button">
-            Cancel
-          </button>
+          {!showFeedback ? (
+            <button
+              onClick={() => setShowFeedback(true)}
+              className="deny-button"
+            >
+              Modify
+            </button>
+          ) : (
+            <button onClick={handleReject} className="deny-button">
+              Send Feedback
+            </button>
+          )}
           <button onClick={onApprove} className="approve-button">
             Approve Plan
           </button>

@@ -1,8 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import type {
   ChatMessage,
   PendingPermission,
   AgentMessageToExtension,
+  AgentStatusMessage,
   PermissionRequestMessage,
   PlanRequestMessage,
 } from '@shared/types';
@@ -20,11 +21,11 @@ interface PendingPlan {
 function App() {
   const [connected, setConnected] = useState(false);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [pendingPermission, setPendingPermission] = useState<PendingPermission | null>(
-    null
-  );
+  const [pendingPermission, setPendingPermission] = useState<PendingPermission | null>(null);
   const [pendingPlan, setPendingPlan] = useState<PendingPlan | null>(null);
   const [tabId, setTabId] = useState<number | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [currentToolCall, setCurrentToolCall] = useState<string | null>(null);
 
   // Get current tab ID on mount
   useEffect(() => {
@@ -34,7 +35,6 @@ function App() {
       }
     });
 
-    // Notify background that sidepanel is ready
     chrome.runtime.sendMessage({ type: 'sidepanel:ready' }).then((response) => {
       if (response?.connected) {
         setConnected(true);
@@ -45,8 +45,6 @@ function App() {
   // Listen for messages from background
   useEffect(() => {
     const handleMessage = (message: any) => {
-      console.log('[Sidepanel] Received message:', message.type);
-
       switch (message.type) {
         case 'backend:connected':
           setConnected(true);
@@ -55,11 +53,17 @@ function App() {
 
         case 'backend:disconnected':
           setConnected(false);
+          setIsProcessing(false);
+          setCurrentToolCall(null);
           addSystemMessage('Disconnected from AI backend');
           break;
 
         case 'agent:message':
           handleAgentMessage(message);
+          break;
+
+        case 'agent:status':
+          handleAgentStatus(message);
           break;
 
         case 'permission:request':
@@ -73,16 +77,18 @@ function App() {
     };
 
     chrome.runtime.onMessage.addListener(handleMessage);
-
     return () => {
       chrome.runtime.onMessage.removeListener(handleMessage);
     };
   }, []);
 
-  // Handle agent message
   const handleAgentMessage = (message: AgentMessageToExtension) => {
+    if (message.done) {
+      setIsProcessing(false);
+      setCurrentToolCall(null);
+    }
+
     if (message.streaming) {
-      // Update last message if streaming
       setMessages((prev) => {
         const last = prev[prev.length - 1];
         if (last?.role === 'agent' && !message.done) {
@@ -101,13 +107,63 @@ function App() {
           },
         ];
       });
-    } else {
-      // Add complete message
+    } else if (message.content) {
       addAgentMessage(message.content);
     }
   };
 
-  // Handle permission request
+  const handleAgentStatus = (message: AgentStatusMessage) => {
+    switch (message.status) {
+      case 'thinking':
+        setIsProcessing(true);
+        setCurrentToolCall(null);
+        break;
+      case 'tool_call':
+        setIsProcessing(true);
+        setCurrentToolCall(message.summary || message.toolName || null);
+        // Add a status message for tool visibility
+        if (message.summary) {
+          setMessages((prev) => {
+            // Replace previous status message if exists
+            const lastMsg = prev[prev.length - 1];
+            if (lastMsg?.role === 'status') {
+              return [
+                ...prev.slice(0, -1),
+                {
+                  id: Date.now().toString(),
+                  role: 'status' as const,
+                  content: message.summary!,
+                  timestamp: Date.now(),
+                  toolName: message.toolName,
+                  status: 'tool_call' as const,
+                },
+              ];
+            }
+            return [
+              ...prev,
+              {
+                id: Date.now().toString(),
+                role: 'status' as const,
+                content: message.summary!,
+                timestamp: Date.now(),
+                toolName: message.toolName,
+                status: 'tool_call' as const,
+              },
+            ];
+          });
+        }
+        break;
+      case 'idle':
+        setIsProcessing(false);
+        setCurrentToolCall(null);
+        break;
+      case 'error':
+        setIsProcessing(false);
+        setCurrentToolCall(null);
+        break;
+    }
+  };
+
   const handlePermissionRequest = (message: PermissionRequestMessage) => {
     setPendingPermission({
       id: message.command.id,
@@ -116,26 +172,12 @@ function App() {
     });
   };
 
-  // Handle plan request
   const handlePlanRequest = (message: PlanRequestMessage) => {
     setPendingPlan({
       planId: message.planId,
       plan: message.plan,
       summary: message.summary,
     });
-  };
-
-  // Add message helpers
-  const addUserMessage = (content: string) => {
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: Date.now().toString(),
-        role: 'user',
-        content,
-        timestamp: Date.now(),
-      },
-    ]);
   };
 
   const addAgentMessage = (content: string) => {
@@ -150,7 +192,7 @@ function App() {
     ]);
   };
 
-  const addSystemMessage = (content: string) => {
+  const addSystemMessage = useCallback((content: string) => {
     setMessages((prev) => [
       ...prev,
       {
@@ -160,18 +202,28 @@ function App() {
         timestamp: Date.now(),
       },
     ]);
-  };
+  }, []);
 
-  // Handle user message send
   const handleSendMessage = async (content: string) => {
     if (!tabId) {
       addSystemMessage('Error: No active tab');
       return;
     }
 
-    addUserMessage(content);
+    // Add user message to UI
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: Date.now().toString(),
+        role: 'user',
+        content,
+        timestamp: Date.now(),
+      },
+    ]);
 
-    // Get current page info for context
+    setIsProcessing(true);
+
+    // Get current page info
     let pageUrl = '';
     let pageTitle = '';
     try {
@@ -180,11 +232,10 @@ function App() {
         pageUrl = tab.url || '';
         pageTitle = tab.title || '';
       }
-    } catch (e) {
-      console.error('Failed to get tab info:', e);
+    } catch {
+      // ignore
     }
 
-    // Send to backend via background script with page context
     chrome.runtime.sendMessage({
       type: 'user:message',
       content,
@@ -194,7 +245,6 @@ function App() {
     });
   };
 
-  // Handle permission response
   const handlePermissionResponse = (approved: boolean) => {
     if (!pendingPermission || !tabId) return;
 
@@ -214,7 +264,6 @@ function App() {
     setPendingPermission(null);
   };
 
-  // Handle plan response
   const handlePlanResponse = (approved: boolean, feedback?: string) => {
     if (!pendingPlan || !tabId) return;
 
@@ -235,14 +284,26 @@ function App() {
     setPendingPlan(null);
   };
 
-  // Handle reconnect
+  const handleClearConversation = () => {
+    setMessages([]);
+    setIsProcessing(false);
+    setCurrentToolCall(null);
+    chrome.runtime.sendMessage({ type: 'conversation:clear' });
+    addSystemMessage('Conversation cleared');
+  };
+
   const handleReconnect = () => {
     chrome.runtime.sendMessage({ type: 'connect:backend' });
   };
 
   return (
     <div className="app">
-      <ConnectionStatus connected={connected} onReconnect={handleReconnect} />
+      <ConnectionStatus
+        connected={connected}
+        onReconnect={handleReconnect}
+        onClear={handleClearConversation}
+        messageCount={messages.filter((m) => m.role !== 'system' && m.role !== 'status').length}
+      />
 
       {pendingPlan && (
         <PlanApproval
@@ -264,6 +325,8 @@ function App() {
         messages={messages}
         onSendMessage={handleSendMessage}
         disabled={!connected}
+        isProcessing={isProcessing}
+        currentToolCall={currentToolCall}
       />
     </div>
   );

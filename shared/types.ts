@@ -14,7 +14,15 @@ export type BrowserCommand =
   | ExtractCommand
   | SnapshotCommand
   | DiscoverCommand
-  | ScreenshotCommand;
+  | ScreenshotCommand
+  | GetPageStructureCommand
+  | ExtractTableCommand
+  | ExtractLinksCommand
+  | GetFormFieldsCommand
+  | ScrollToCommand
+  | SearchPageCommand
+  | EvalCommand
+  | WaitForElementCommand;
 
 export interface NavigateCommand {
   type: 'navigate';
@@ -73,6 +81,52 @@ export interface InteractiveElement {
   isInViewport: boolean;
 }
 
+export interface GetPageStructureCommand {
+  type: 'get_page_structure';
+  id: string;
+}
+
+export interface ExtractTableCommand {
+  type: 'extract_table';
+  id: string;
+  selector: string;
+}
+
+export interface ExtractLinksCommand {
+  type: 'extract_links';
+  id: string;
+}
+
+export interface GetFormFieldsCommand {
+  type: 'get_form_fields';
+  id: string;
+}
+
+export interface ScrollToCommand {
+  type: 'scroll_to';
+  id: string;
+  target: string | 'top' | 'bottom';
+}
+
+export interface SearchPageCommand {
+  type: 'search_page';
+  id: string;
+  query: string;
+}
+
+export interface EvalCommand {
+  type: 'eval';
+  id: string;
+  code: string;
+}
+
+export interface WaitForElementCommand {
+  type: 'wait_for_element';
+  id: string;
+  selector: string;
+  timeout: number;
+}
+
 // ============================================================================
 // Command Results
 // ============================================================================
@@ -85,21 +139,25 @@ export interface CommandResult {
 }
 
 // ============================================================================
-// WebSocket Messages (Extension ↔ Backend)
+// WebSocket Messages (Extension <-> Backend)
 // ============================================================================
 
 export type WSMessage =
   | ExtensionReadyMessage
   | UserMessageFromExtension
   | AgentMessageToExtension
+  | AgentStatusMessage
   | CommandRequestMessage
   | CommandResponseMessage
   | PermissionRequestMessage
   | PermissionResponseMessage
   | PlanRequestMessage
-  | PlanResponseMessage;
+  | PlanResponseMessage
+  | ConversationClearMessage
+  | HeartbeatMessage
+  | PongMessage;
 
-// Extension → Backend
+// Extension -> Backend
 export interface ExtensionReadyMessage {
   type: 'extension:ready';
   tabId: number;
@@ -126,12 +184,28 @@ export interface PermissionResponseMessage {
   tabId: number;
 }
 
-// Backend → Extension
+export interface ConversationClearMessage {
+  type: 'conversation:clear';
+}
+
+export interface PongMessage {
+  type: 'pong';
+}
+
+// Backend -> Extension
 export interface AgentMessageToExtension {
   type: 'agent:message';
   content: string;
   streaming: boolean;
   done: boolean;
+}
+
+export interface AgentStatusMessage {
+  type: 'agent:status';
+  status: 'thinking' | 'tool_call' | 'tool_result' | 'idle' | 'error';
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
+  summary?: string;
 }
 
 export interface CommandRequestMessage {
@@ -145,19 +219,23 @@ export interface PermissionRequestMessage {
   description: string;
 }
 
+export interface HeartbeatMessage {
+  type: 'heartbeat';
+}
+
 // Plan approval messages
 export interface PlanRequestMessage {
   type: 'plan:request';
   planId: string;
-  plan: string[];  // List of planned actions
-  summary: string; // Brief description
+  plan: string[];
+  summary: string;
 }
 
 export interface PlanResponseMessage {
   type: 'plan:response';
   planId: string;
   approved: boolean;
-  feedback?: string; // If user wants to modify
+  feedback?: string;
 }
 
 // ============================================================================
@@ -169,7 +247,6 @@ export interface AgentConfig {
   model: string;
   apiKey: string;
   maxSteps?: number;
-  // Azure-specific configuration
   azureResourceName?: string;
   azureDeployment?: string;
   azureApiVersion?: string;
@@ -196,9 +273,11 @@ export interface MCPConfig {
 
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'agent' | 'system';
+  role: 'user' | 'agent' | 'system' | 'status';
   content: string;
   timestamp: number;
+  toolName?: string;
+  status?: 'thinking' | 'tool_call' | 'tool_result' | 'error';
 }
 
 export interface PendingPermission {
