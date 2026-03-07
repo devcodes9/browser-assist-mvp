@@ -382,6 +382,94 @@ export function createBrowserTools(options: BrowserToolsOptions) {
       },
     }),
 
+    discover_all: tool({
+      description:
+        'Scan the ENTIRE page by scrolling through it, finding all interactive elements including those below the fold and lazy-loaded content. Use this instead of discover() when you need a complete picture of the page. Returns elements without bounding boxes (position-independent).',
+      parameters: z.object({}),
+      execute: async () => {
+        const command: BrowserCommand = {
+          type: 'discover_all',
+          id: `discall-${Date.now()}`,
+        };
+        return await executeCommand(command);
+      },
+    }),
+
+    get_app_state: tool({
+      description:
+        'Detect and extract SPA framework state: Next.js (__NEXT_DATA__), Nuxt, React, Vue, Angular, Redux stores, meta tags, and JSON-LD structured data. Powerful for understanding what data the page has without scraping the DOM.',
+      parameters: z.object({}),
+      execute: async () => {
+        const command: BrowserCommand = {
+          type: 'get_app_state',
+          id: `appstate-${Date.now()}`,
+        };
+        return await executeCommand(command);
+      },
+    }),
+
+    fetch_from_page: tool({
+      description:
+        'Make an authenticated HTTP request from the page context. Uses the page\'s cookies and session automatically. Useful for calling APIs that require authentication without any setup. Requires approval.',
+      parameters: z.object({
+        url: z.string().describe('URL to fetch'),
+        method: z.string().optional().default('GET').describe('HTTP method (GET, POST, etc.)'),
+        headers: z.record(z.string()).optional().describe('Optional request headers'),
+        body: z.string().optional().describe('Optional request body (for POST/PUT)'),
+      }),
+      execute: async ({ url, method, headers, body }) => {
+        const command: BrowserCommand = {
+          type: 'fetch_from_page',
+          id: `fetch-${Date.now()}`,
+          url,
+          method: method ?? 'GET',
+          headers,
+          body,
+        };
+
+        const approved = await requestPermission(
+          command,
+          `Fetch ${method ?? 'GET'} ${url}`
+        );
+        if (!approved) {
+          return { success: false, error: 'Permission denied by user' };
+        }
+
+        return await executeCommand(command);
+      },
+    }),
+
+    observe_mutations: tool({
+      description:
+        'Watch for DOM changes on the page (or a specific element). Useful after clicking a button or submitting a form to know when the page has finished updating. Returns a summary of what changed.',
+      parameters: z.object({
+        selector: z.string().optional().describe('CSS selector to observe (default: entire page)'),
+        timeout: z.number().optional().default(5000).describe('Max time to wait for changes in ms (default 5000)'),
+      }),
+      execute: async ({ selector, timeout }) => {
+        const command: BrowserCommand = {
+          type: 'observe_mutations',
+          id: `observe-${Date.now()}`,
+          selector,
+          timeout: timeout ?? 5000,
+        };
+        return await executeCommand(command);
+      },
+    }),
+
+    get_page_sections: tool({
+      description:
+        'Get the page content broken into semantic sections based on headings and landmarks. Returns structured content with heading hierarchy, section text, and navigation links. Better than snapshot() for understanding page layout and content.',
+      parameters: z.object({}),
+      execute: async () => {
+        const command: BrowserCommand = {
+          type: 'get_page_sections',
+          id: `sections-${Date.now()}`,
+        };
+        return await executeCommand(command);
+      },
+    }),
+
     show_plan: tool({
       description:
         'Show a plan to the user and wait for approval before executing actions. Call this FIRST before taking any actions. Once approved, all subsequent navigate/click/type actions will auto-execute without individual permission prompts. Call again if you need to deviate from the original plan.',

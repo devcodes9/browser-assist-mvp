@@ -55,9 +55,46 @@ async function executeCommand(command) {
             return executeEval(command.id, command.code);
         case 'wait_for_element':
             return executeWaitForElement(command.id, command.selector, command.timeout);
+        case 'discover_all':
+            return executeDiscoverAll(command.id);
+        case 'get_app_state':
+            return executeGetAppState(command.id);
+        case 'fetch_from_page':
+            return executeFetchFromPage(command.id, command.url, command.method, command.headers, command.body);
+        case 'observe_mutations':
+            return executeObserveMutations(command.id, command.selector, command.timeout);
+        case 'get_page_sections':
+            return executeGetPageSections(command.id);
         default:
             throw new Error(`Unknown command type: ${command.type}`);
     }
+}
+// Shadow DOM-aware querySelector: searches through shadow roots
+function deepQuerySelector(selector, root = document) {
+    // Try normal querySelector first
+    const result = root.querySelector(selector);
+    if (result)
+        return result;
+    // Search inside shadow roots
+    const allElements = root.querySelectorAll('*');
+    for (const el of allElements) {
+        if (el.shadowRoot) {
+            const shadowResult = deepQuerySelector(selector, el.shadowRoot);
+            if (shadowResult)
+                return shadowResult;
+        }
+    }
+    return null;
+}
+function deepQuerySelectorAll(selector, root = document) {
+    const results = Array.from(root.querySelectorAll(selector));
+    const allElements = root.querySelectorAll('*');
+    for (const el of allElements) {
+        if (el.shadowRoot) {
+            results.push(...deepQuerySelectorAll(selector, el.shadowRoot));
+        }
+    }
+    return results;
 }
 // Navigate to URL
 async function executeNavigate(id, url) {
@@ -72,7 +109,7 @@ async function executeNavigate(id, url) {
 }
 // Click element
 async function executeClick(id, selector) {
-    const element = document.querySelector(selector);
+    const element = document.querySelector(selector) || deepQuerySelector(selector);
     if (!element) {
         throw new Error(`Element not found: ${selector}`);
     }
@@ -86,7 +123,7 @@ async function executeClick(id, selector) {
 }
 // Type text into element
 async function executeType(id, selector, text) {
-    const element = document.querySelector(selector);
+    const element = document.querySelector(selector) || deepQuerySelector(selector);
     if (!element) {
         throw new Error(`Element not found: ${selector}`);
     }
@@ -119,7 +156,7 @@ async function executeType(id, selector, text) {
 }
 // Extract content from element
 async function executeExtract(id, selector) {
-    const element = document.querySelector(selector);
+    const element = document.querySelector(selector) || deepQuerySelector(selector);
     if (!element) {
         throw new Error(`Element not found: ${selector}`);
     }
@@ -454,6 +491,378 @@ async function executeWaitForElement(id, selector, timeout) {
         id,
         success: false,
         error: `Element not found after ${timeout}ms: ${selector}`,
+    };
+}
+// ============================================================================
+// Phase 2: Deep Context Tools
+// ============================================================================
+// Discover ALL interactive elements by scrolling through the entire page
+async function executeDiscoverAll(id) {
+    const originalScrollY = window.scrollY;
+    const pageHeight = document.body.scrollHeight;
+    const viewportHeight = window.innerHeight;
+    const allElements = new Map();
+    const interactiveSelectors = [
+        'a[href]', 'button', 'input:not([type="hidden"])', 'textarea', 'select',
+        '[role="button"]', '[role="link"]', '[role="checkbox"]', '[role="radio"]',
+        '[role="textbox"]', '[role="menuitem"]', '[role="tab"]',
+        '[onclick]', '[tabindex]:not([tabindex="-1"])',
+    ].join(', ');
+    // Scroll through the page in viewport-sized chunks
+    const scrollSteps = Math.ceil(pageHeight / viewportHeight);
+    for (let step = 0; step <= scrollSteps; step++) {
+        window.scrollTo({ top: step * viewportHeight, behavior: 'instant' });
+        // Small delay for lazy-loaded content to appear
+        await new Promise((r) => setTimeout(r, 150));
+        // Also check shadow DOM
+        const elements = deepQuerySelectorAll(interactiveSelectors);
+        for (let i = 0; i < elements.length; i++) {
+            const el = elements[i];
+            if (!(el instanceof HTMLElement))
+                continue;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden')
+                continue;
+            const selector = generateUniqueSelector(el, allElements.size);
+            if (allElements.has(selector))
+                continue;
+            const text = el.getAttribute('aria-label') ||
+                el.getAttribute('alt') ||
+                el.getAttribute('title') ||
+                el.innerText?.trim().slice(0, 100) ||
+                el.getAttribute('placeholder') ||
+                '';
+            const attributes = {};
+            for (const attr of ['href', 'src', 'alt', 'title', 'placeholder', 'value', 'name', 'id', 'class', 'type']) {
+                const value = el.getAttribute(attr);
+                if (value)
+                    attributes[attr] = value.slice(0, 200);
+            }
+            allElements.set(selector, {
+                selector,
+                tagName: el.tagName.toLowerCase(),
+                text,
+                role: el.getAttribute('role') || undefined,
+                type: el instanceof HTMLInputElement ? el.type : undefined,
+                attributes,
+            });
+        }
+    }
+    // Restore original scroll position
+    window.scrollTo({ top: originalScrollY, behavior: 'instant' });
+    return {
+        id,
+        success: true,
+        data: {
+            elements: Array.from(allElements.values()),
+            totalElements: allElements.size,
+            pageHeight,
+            url: window.location.href,
+        },
+    };
+}
+// Get SPA framework state (__NEXT_DATA__, React, Vue, Angular, etc.)
+async function executeGetAppState(id) {
+    const state = {};
+    // Next.js
+    const nextData = window.__NEXT_DATA__;
+    if (nextData) {
+        state.nextjs = {
+            page: nextData.page,
+            query: nextData.query,
+            buildId: nextData.buildId,
+            props: truncateDeep(nextData.props?.pageProps, 3),
+        };
+    }
+    // Nuxt.js
+    const nuxtData = window.__NUXT__;
+    if (nuxtData) {
+        state.nuxt = {
+            state: truncateDeep(nuxtData.state, 3),
+            data: truncateDeep(nuxtData.data, 3),
+        };
+    }
+    // Generic window stores (Redux, Zustand, etc.)
+    const storeKeys = ['__STORE__', '__REDUX_STORE__', '__store'];
+    for (const key of storeKeys) {
+        const store = window[key];
+        if (store) {
+            const storeState = typeof store.getState === 'function' ? store.getState() : store;
+            state[key] = truncateDeep(storeState, 3);
+        }
+    }
+    // React root detection
+    const reactRoot = document.getElementById('root') || document.getElementById('__next') || document.getElementById('app');
+    if (reactRoot) {
+        const fiberKey = Object.keys(reactRoot).find((k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
+        if (fiberKey) {
+            state.reactDetected = true;
+            state.reactRootId = reactRoot.id;
+        }
+    }
+    // Angular
+    const ngRoot = document.querySelector('[ng-version]') || document.querySelector('[_nghost]');
+    if (ngRoot) {
+        state.angularDetected = true;
+        state.angularVersion = ngRoot.getAttribute('ng-version') || 'unknown';
+    }
+    // Vue
+    const vueRoot = document.querySelector('[data-v-app]') || document.querySelector('#app');
+    if (vueRoot && vueRoot.__vue_app__) {
+        state.vueDetected = true;
+    }
+    // Meta tags (useful for understanding the page)
+    const metaTags = {};
+    document.querySelectorAll('meta[name], meta[property]').forEach((meta) => {
+        const name = meta.getAttribute('name') || meta.getAttribute('property') || '';
+        const content = meta.getAttribute('content') || '';
+        if (name && content)
+            metaTags[name] = content.slice(0, 200);
+    });
+    if (Object.keys(metaTags).length > 0) {
+        state.meta = metaTags;
+    }
+    // JSON-LD structured data
+    const jsonLdScripts = document.querySelectorAll('script[type="application/ld+json"]');
+    if (jsonLdScripts.length > 0) {
+        const jsonLd = [];
+        jsonLdScripts.forEach((script) => {
+            try {
+                jsonLd.push(JSON.parse(script.textContent || ''));
+            }
+            catch {
+                // invalid JSON-LD, skip
+            }
+        });
+        if (jsonLd.length > 0)
+            state.jsonLd = jsonLd;
+    }
+    return {
+        id,
+        success: true,
+        data: {
+            frameworks: Object.keys(state).filter((k) => !['meta', 'jsonLd'].includes(k)),
+            state,
+            url: window.location.href,
+        },
+    };
+}
+// Truncate deeply nested objects to prevent huge payloads
+function truncateDeep(obj, maxDepth, currentDepth = 0) {
+    if (currentDepth >= maxDepth)
+        return '[truncated]';
+    if (obj === null || obj === undefined)
+        return obj;
+    if (typeof obj !== 'object') {
+        if (typeof obj === 'string' && obj.length > 500)
+            return obj.slice(0, 500) + '...';
+        return obj;
+    }
+    if (Array.isArray(obj)) {
+        return obj.slice(0, 10).map((item) => truncateDeep(item, maxDepth, currentDepth + 1));
+    }
+    const result = {};
+    const keys = Object.keys(obj);
+    for (const key of keys.slice(0, 20)) {
+        result[key] = truncateDeep(obj[key], maxDepth, currentDepth + 1);
+    }
+    if (keys.length > 20)
+        result['...'] = `${keys.length - 20} more keys`;
+    return result;
+}
+// Make authenticated fetch from page context (uses page's cookies/session)
+async function executeFetchFromPage(id, url, method, headers, body) {
+    try {
+        const options = {
+            method,
+            credentials: 'include', // Include cookies
+        };
+        if (headers) {
+            options.headers = headers;
+        }
+        if (body && method !== 'GET' && method !== 'HEAD') {
+            options.body = body;
+        }
+        const response = await fetch(url, options);
+        const contentType = response.headers.get('content-type') || '';
+        let responseData;
+        if (contentType.includes('application/json')) {
+            responseData = await response.json();
+            // Truncate large JSON responses
+            responseData = truncateDeep(responseData, 4);
+        }
+        else {
+            const text = await response.text();
+            responseData = text.slice(0, 10000);
+        }
+        return {
+            id,
+            success: true,
+            data: {
+                status: response.status,
+                statusText: response.statusText,
+                contentType,
+                body: responseData,
+            },
+        };
+    }
+    catch (error) {
+        throw new Error(`Fetch failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+// Observe DOM mutations (useful after actions to know when page finished updating)
+async function executeObserveMutations(id, selector, timeout = 5000) {
+    const target = selector
+        ? (document.querySelector(selector) || document.body)
+        : document.body;
+    return new Promise((resolve) => {
+        const changes = [];
+        let settled = false;
+        let debounceTimer;
+        const observer = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                const targetEl = mutation.target;
+                const targetDesc = targetEl.id
+                    ? `#${targetEl.id}`
+                    : targetEl.tagName?.toLowerCase() || 'unknown';
+                if (mutation.type === 'childList') {
+                    const added = mutation.addedNodes.length;
+                    const removed = mutation.removedNodes.length;
+                    if (added > 0 || removed > 0) {
+                        changes.push({
+                            type: 'childList',
+                            target: targetDesc,
+                            summary: `+${added} -${removed} nodes`,
+                        });
+                    }
+                }
+                else if (mutation.type === 'attributes') {
+                    changes.push({
+                        type: 'attributes',
+                        target: targetDesc,
+                        summary: `${mutation.attributeName} changed`,
+                    });
+                }
+            }
+            // Debounce: wait for mutations to settle (300ms of quiet)
+            clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+                if (!settled) {
+                    settled = true;
+                    observer.disconnect();
+                    resolve({
+                        id,
+                        success: true,
+                        data: {
+                            changed: true,
+                            totalChanges: changes.length,
+                            changes: changes.slice(0, 20), // Limit to 20 most recent
+                        },
+                    });
+                }
+            }, 300);
+        });
+        observer.observe(target, {
+            childList: true,
+            attributes: true,
+            subtree: true,
+        });
+        // Timeout: resolve even if no mutations observed
+        setTimeout(() => {
+            if (!settled) {
+                settled = true;
+                observer.disconnect();
+                resolve({
+                    id,
+                    success: true,
+                    data: {
+                        changed: changes.length > 0,
+                        totalChanges: changes.length,
+                        changes: changes.slice(0, 20),
+                        timedOut: true,
+                    },
+                });
+            }
+        }, timeout);
+    });
+}
+// Get page broken into semantic sections (structured content)
+async function executeGetPageSections(id) {
+    const sections = [];
+    // Strategy: find all heading elements, then extract content between them
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+    if (headings.length === 0) {
+        // No headings — try semantic elements
+        const semanticSelectors = ['main', 'article', 'section', '[role="main"]', '.content', '#content'];
+        for (const sel of semanticSelectors) {
+            const el = document.querySelector(sel);
+            if (el) {
+                sections.push({
+                    type: el.tagName.toLowerCase(),
+                    content: el.textContent?.replace(/\s+/g, ' ').trim().slice(0, 2000) || '',
+                    selector: sel,
+                });
+            }
+        }
+        if (sections.length === 0) {
+            sections.push({
+                type: 'body',
+                content: document.body.textContent?.replace(/\s+/g, ' ').trim().slice(0, 5000) || '',
+            });
+        }
+    }
+    else {
+        // Walk through headings and extract section content
+        for (let i = 0; i < headings.length; i++) {
+            const heading = headings[i];
+            const headingTag = heading.tagName.toLowerCase();
+            const headingText = heading.textContent?.trim() || '';
+            // Collect text between this heading and the next
+            let content = '';
+            let sibling = heading.nextElementSibling;
+            while (sibling) {
+                // Stop if we hit the next heading of same or higher level
+                if (sibling.tagName.match(/^H[1-6]$/)) {
+                    const siblingLevel = parseInt(sibling.tagName[1]);
+                    const currentLevel = parseInt(headingTag[1]);
+                    if (siblingLevel <= currentLevel)
+                        break;
+                }
+                content += (sibling.textContent?.trim() || '') + ' ';
+                sibling = sibling.nextElementSibling;
+            }
+            content = content.replace(/\s+/g, ' ').trim();
+            if (headingText || content) {
+                sections.push({
+                    type: headingTag,
+                    heading: headingText.slice(0, 200),
+                    content: content.slice(0, 2000),
+                    selector: heading.id ? `#${heading.id}` : undefined,
+                });
+            }
+        }
+    }
+    // Also extract nav links
+    const navs = document.querySelectorAll('nav');
+    const navData = [];
+    navs.forEach((nav) => {
+        nav.querySelectorAll('a[href]').forEach((link) => {
+            const a = link;
+            const text = a.textContent?.trim() || '';
+            if (text)
+                navData.push({ text: text.slice(0, 100), href: a.href });
+        });
+    });
+    return {
+        id,
+        success: true,
+        data: {
+            title: document.title,
+            url: window.location.href,
+            sections: sections.slice(0, 30),
+            navigation: navData.slice(0, 30),
+            totalSections: sections.length,
+        },
     };
 }
 export {};

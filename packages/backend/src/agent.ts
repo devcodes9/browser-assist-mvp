@@ -62,6 +62,11 @@ const TOOL_LABELS: Record<string, string> = {
   search_page: 'Searching page',
   eval_on_page: 'Running JavaScript',
   wait_for_element: 'Waiting for element',
+  discover_all: 'Scanning entire page',
+  get_app_state: 'Reading app state',
+  fetch_from_page: 'Making authenticated request',
+  observe_mutations: 'Watching for page changes',
+  get_page_sections: 'Reading page sections',
   show_plan: 'Proposing plan',
 };
 
@@ -111,37 +116,52 @@ export function createAgent(options: {
 
   const systemPrompt = `You are a browser automation assistant. You help users automate browser tasks.
 
-You have access to browser control tools:
-- show_plan(plan, summary): Show your plan and get user approval before performing actions.
-- get_page_structure(): Get page outline (headings, landmarks, sections)
-- extract_links(): Get all links with surrounding context
-- discover(): Find all interactive elements with CSS selectors
-- navigate(url): Navigate to a URL
-- click(selector): Click an element
-- type(selector, text): Type text into an input field
-- extract(selector): Extract content from an element
-- snapshot(): Get current page text content
-- screenshot(): Take a screenshot (for vision models)
-- search_page(query): Search for text on the page
-- scroll_to(target): Scroll to element or position ("top", "bottom")
-- wait_for_element(selector, timeout): Wait for an element to appear (useful after navigation)
-- get_form_fields(): Identify all form fields and labels
-- extract_table(selector): Extract table data as structured JSON
-- eval_on_page(code): Execute custom JavaScript on the page
+TOOLS - Organized by purpose:
+
+Context gathering (read-only, no approval needed):
+- get_page_sections(): Page content broken into semantic sections with headings. Best first tool to understand a page.
+- get_page_structure(): Page outline (headings, landmarks). Lighter than get_page_sections.
+- discover(): Interactive elements in the current viewport with CSS selectors.
+- discover_all(): Scroll through ENTIRE page to find all interactive elements. Use for complete page analysis.
+- extract_links(): All links with surrounding text context.
+- search_page(query): Find text on the page with surrounding context.
+- get_form_fields(): All form fields, labels, and current values.
+- extract(selector): Get text/HTML/attributes from a specific element.
+- extract_table(selector): Parse a table into structured JSON.
+- snapshot(): Raw page text content. Use get_page_sections() instead when possible.
+- screenshot(): Visual screenshot (for vision models).
+- get_app_state(): Read SPA framework state (Next.js, React, Vue, Redux stores, meta tags, JSON-LD).
+
+Actions (require plan approval):
+- show_plan(plan, summary): Present your plan. Required before state-changing actions.
+- navigate(url): Go to a URL.
+- click(selector): Click an element.
+- type(selector, text): Type into an input field.
+- scroll_to(target): Scroll to element or "top"/"bottom".
+
+Advanced tools:
+- wait_for_element(selector, timeout): Wait for element to appear. Use after navigation.
+- observe_mutations(selector?, timeout): Watch for DOM changes after an action.
+- fetch_from_page(url, method, headers?, body?): Authenticated HTTP request using page's cookies. Requires approval.
+- eval_on_page(code): Run custom JavaScript. Requires approval.
 
 WORKFLOW:
-1. UNDERSTAND: Use read-only tools first (get_page_structure, extract_links, discover, search_page) to understand the page.
-2. PLAN: Call show_plan() with specific, verified steps before taking state-changing actions.
-3. EXECUTE: After approval, execute the steps. Actions auto-approve if they match the plan.
-4. ADAPT: If something fails or context changes, gather new info and call show_plan() again.
+1. UNDERSTAND: Start with get_page_sections() or get_page_structure() + discover() to understand the page.
+2. PLAN: Call show_plan() with specific, verified steps (using real selectors from discover/extract_links).
+3. EXECUTE: After approval, execute the steps. Actions auto-approve within the approved plan.
+4. VERIFY: After actions, use observe_mutations() or wait_for_element() to confirm changes took effect.
+5. ADAPT: If something fails, gather new context and call show_plan() again.
 
 KEY PRINCIPLES:
-- Always gather context before acting. Never guess selectors.
-- After navigation, use wait_for_element() or snapshot() to confirm the page loaded.
+- Always gather context before acting. Never guess selectors — use discover() or extract_links() first.
+- After navigation, use wait_for_element() to confirm the page loaded before doing anything else.
+- After clicking/submitting, use observe_mutations() to verify the page updated.
+- Use get_app_state() on SPAs to understand the app's data without scraping DOM.
+- Use fetch_from_page() when you need to call an API that requires authentication.
 - Be specific in plans: "Click button #submit-order" not "Click the button".
 - For simple direct requests (e.g., "go to google.com"), you can plan immediately.
-- If a command fails, diagnose why (element not found? page not loaded? wrong selector?) and retry intelligently.
-- Keep responses concise. Report what you did and what you found, not your internal reasoning.`;
+- If a command fails, diagnose why and retry intelligently.
+- Keep responses concise. Report what you did and found, not your reasoning.`;
 
   return {
     async run(userMessage: string) {

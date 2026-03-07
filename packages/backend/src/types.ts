@@ -22,7 +22,12 @@ export type BrowserCommand =
   | ScrollToCommand
   | SearchPageCommand
   | EvalCommand
-  | WaitForElementCommand;
+  | WaitForElementCommand
+  | DiscoverAllCommand
+  | GetAppStateCommand
+  | FetchFromPageCommand
+  | ObserveMutationsCommand
+  | GetPageSectionsCommand;
 
 export interface NavigateCommand {
   type: 'navigate';
@@ -108,6 +113,37 @@ export interface WaitForElementCommand {
   id: string;
   selector: string;
   timeout: number;
+}
+
+export interface DiscoverAllCommand {
+  type: 'discover_all';
+  id: string;
+}
+
+export interface GetAppStateCommand {
+  type: 'get_app_state';
+  id: string;
+}
+
+export interface FetchFromPageCommand {
+  type: 'fetch_from_page';
+  id: string;
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+export interface ObserveMutationsCommand {
+  type: 'observe_mutations';
+  id: string;
+  selector?: string;
+  timeout: number;
+}
+
+export interface GetPageSectionsCommand {
+  type: 'get_page_sections';
+  id: string;
 }
 
 // ============================================================================
