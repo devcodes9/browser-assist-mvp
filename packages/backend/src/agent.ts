@@ -1,9 +1,10 @@
 /**
  * AI SDK Agent
- * Handles reasoning, planning, and tool orchestration
+ * Handles reasoning and tool orchestration. No approval gating —
+ * the user controls execution via the Stop button.
  */
 
-import { generateText } from 'ai';
+import { generateText, NoSuchToolError } from 'ai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAzure } from '@ai-sdk/azure';
@@ -16,32 +17,14 @@ interface ConversationMessage {
   content: string;
 }
 
-interface PlanRequest {
-  planId: string;
-  plan: string[];
-  summary: string;
-}
-
 interface AgentCallbacks {
   onMessage: (content: string, streaming?: boolean, done?: boolean) => void;
   onStatus: (status: 'thinking' | 'tool_call' | 'tool_result' | 'idle' | 'error', toolName?: string, toolArgs?: Record<string, unknown>, summary?: string) => void;
   onCommandRequest: (command: BrowserCommand) => void;
-  onPermissionRequest: (command: BrowserCommand, description: string) => void;
-  onPlanRequest: (plan: PlanRequest) => void;
 }
 
 interface PendingCommand {
   resolve: (result: CommandResult) => void;
-  reject: (error: Error) => void;
-}
-
-interface PendingPermission {
-  resolve: (approved: boolean) => void;
-  reject: (error: Error) => void;
-}
-
-interface PendingPlan {
-  resolve: (result: { approved: boolean; feedback?: string }) => void;
   reject: (error: Error) => void;
 }
 
@@ -67,44 +50,36 @@ const TOOL_LABELS: Record<string, string> = {
   fetch_from_page: 'Making authenticated request',
   observe_mutations: 'Watching for page changes',
   get_page_sections: 'Reading page sections',
-  show_plan: 'Proposing plan',
+  list_tabs: 'Listing browser tabs',
+  switch_tab: 'Switching tab',
+  open_tab: 'Opening new tab',
+  close_tab: 'Closing tab',
 };
 
 export function createAgent(options: {
   config: AgentConfig;
   conversationHistory: ConversationMessage[];
-  isPlanApproved: () => boolean;
+  abortSignal?: AbortSignal;
   onMessage: AgentCallbacks['onMessage'];
   onStatus: AgentCallbacks['onStatus'];
   onCommandRequest: AgentCallbacks['onCommandRequest'];
-  onPermissionRequest: AgentCallbacks['onPermissionRequest'];
-  onPlanRequest: AgentCallbacks['onPlanRequest'];
 }) {
   const {
     config,
     conversationHistory,
-    isPlanApproved,
+    abortSignal,
     onMessage,
     onStatus,
     onCommandRequest,
-    onPermissionRequest,
-    onPlanRequest,
   } = options;
 
   const pendingCommands = new Map<string, PendingCommand>();
-  const pendingPermissions = new Map<string, PendingPermission>();
-  const pendingPlans = new Map<string, PendingPlan>();
 
   const model = getModel(config);
 
   const browserTools = createBrowserTools({
     onCommandRequest,
-    onPermissionRequest,
-    onPlanRequest,
     pendingCommands,
-    pendingPermissions,
-    pendingPlans,
-    isPlanApproved,
   });
 
   const mcpTools = loadMCPTools();
@@ -114,54 +89,56 @@ export function createAgent(options: {
     ...mcpTools,
   };
 
-  const systemPrompt = `You are a browser automation assistant. You help users automate browser tasks.
+  const systemPrompt = `You are a browser automation agent. The user gives you a task; you execute it directly using browser tools. The user can press Stop at any time, so don't ask for approval — just act.
 
-TOOLS - Organized by purpose:
+# Style
+- Lead with action. Briefly state what you're about to do in one short line if it's non-trivial, then do it.
+- Never ask "Would you like me to…" or "Should I…". Just proceed.
+- When you finish, report the result in 1-3 lines. Lead with the answer.
+- If you genuinely cannot proceed (need credentials, ambiguous target, page broken), say so concisely and stop.
 
-Context gathering (read-only, no approval needed):
-- get_page_sections(): Page content broken into semantic sections with headings. Best first tool to understand a page.
-- get_page_structure(): Page outline (headings, landmarks). Lighter than get_page_sections.
-- discover(): Interactive elements in the current viewport with CSS selectors.
-- discover_all(): Scroll through ENTIRE page to find all interactive elements. Use for complete page analysis.
-- extract_links(): All links with surrounding text context.
-- search_page(query): Find text on the page with surrounding context.
-- get_form_fields(): All form fields, labels, and current values.
-- extract(selector): Get text/HTML/attributes from a specific element.
-- extract_table(selector): Parse a table into structured JSON.
-- snapshot(): Raw page text content. Use get_page_sections() instead when possible.
-- screenshot(): Visual screenshot (for vision models).
-- get_app_state(): Read SPA framework state (Next.js, React, Vue, Redux stores, meta tags, JSON-LD).
+# Loop
+1. Read the page before acting. Use get_page_sections() for content or discover() / discover_all() for interactive elements. Never guess selectors.
+2. Act. Use the right tool — navigate, click, type, fetch_from_page, etc.
+3. Verify. After navigation use wait_for_element(); after a click that triggers async UI use observe_mutations(). Don't assume success.
+4. Adapt. If a step fails, try ONE alternative. If that fails, stop and explain.
 
-Actions (require plan approval):
-- show_plan(plan, summary): Present your plan. Required before state-changing actions.
-- navigate(url): Go to a URL.
-- click(selector): Click an element.
-- type(selector, text): Type into an input field.
-- scroll_to(target): Scroll to element or "top"/"bottom".
+# Tools
 
-Advanced tools:
-- wait_for_element(selector, timeout): Wait for element to appear. Use after navigation.
-- observe_mutations(selector?, timeout): Watch for DOM changes after an action.
-- fetch_from_page(url, method, headers?, body?): Authenticated HTTP request using page's cookies. Requires approval.
-- eval_on_page(code): Run custom JavaScript. Requires approval.
+Reading:
+- get_page_sections(): semantic content by section — usually the best first read.
+- discover(): interactive elements in viewport with CSS selectors.
+- discover_all(): scrolls the whole page; use when target may be below the fold or lazy-loaded.
+- extract_links(): links with surrounding context.
+- search_page(query): find text on the current page.
+- get_form_fields(): form fields, labels, current values.
+- extract(selector) / extract_table(selector): scoped text or tabular data.
+- get_page_structure(): heading/landmark outline.
+- snapshot(): raw page text fallback.
+- screenshot(): visual capture.
+- get_app_state(): Next.js / React / Vue / Redux / JSON-LD state without scraping the DOM.
 
-WORKFLOW:
-1. UNDERSTAND: Start with get_page_sections() or get_page_structure() + discover() to understand the page.
-2. PLAN: Call show_plan() with specific, verified steps (using real selectors from discover/extract_links).
-3. EXECUTE: After approval, execute the steps. Actions auto-approve within the approved plan.
-4. VERIFY: After actions, use observe_mutations() or wait_for_element() to confirm changes took effect.
-5. ADAPT: If something fails, gather new context and call show_plan() again.
+Navigation & tabs:
+- navigate(url), scroll_to(target).
+- list_tabs(), switch_tab(tabId), open_tab(url), close_tab(tabId).
 
-KEY PRINCIPLES:
-- Always gather context before acting. Never guess selectors — use discover() or extract_links() first.
-- After navigation, use wait_for_element() to confirm the page loaded before doing anything else.
-- After clicking/submitting, use observe_mutations() to verify the page updated.
-- Use get_app_state() on SPAs to understand the app's data without scraping DOM.
-- Use fetch_from_page() when you need to call an API that requires authentication.
-- Be specific in plans: "Click button #submit-order" not "Click the button".
-- For simple direct requests (e.g., "go to google.com"), you can plan immediately.
-- If a command fails, diagnose why and retry intelligently.
-- Keep responses concise. Report what you did and found, not your reasoning.`;
+Acting:
+- click(selector), type(selector, text).
+
+Advanced:
+- wait_for_element(selector, timeout).
+- observe_mutations(selector, timeout).
+- fetch_from_page(url, method, headers, body): authenticated HTTP from the page's session.
+- eval_on_page(code): arbitrary JS when no dedicated tool fits.
+
+# Failure & dead ends
+- If a page is broken (404, maintenance, access denied), don't keep poking it. Move on or report.
+- Don't retry the same failing action. Diagnose (wrong selector? page not loaded? wrong tab?) and change something, or stop.
+- For multi-site tasks: if one site is down, skip it and continue.
+
+# Research & comparison
+- Use open_tab() + switch_tab() to gather from multiple sources in parallel-ish.
+- Use extract_links() to find subpages worth visiting. Try different search terms before declaring "not found".`;
 
   return {
     async run(userMessage: string) {
@@ -183,6 +160,27 @@ KEY PRINCIPLES:
           messages,
           tools,
           maxSteps: config.maxSteps,
+          abortSignal,
+          // Repair malformed tool calls — most commonly Llama/Groq sending
+          // `null` or `""` for zero-parameter tools instead of `{}`.
+          experimental_repairToolCall: async ({ toolCall, error }) => {
+            if (NoSuchToolError.isInstance(error)) return null;
+
+            const argsStr = typeof toolCall.args === 'string'
+              ? toolCall.args.trim()
+              : JSON.stringify(toolCall.args);
+
+            if (argsStr === '' || argsStr === 'null' || argsStr === 'undefined' || toolCall.args == null) {
+              return {
+                toolCallType: 'function',
+                toolCallId: toolCall.toolCallId,
+                toolName: toolCall.toolName,
+                args: '{}',
+              };
+            }
+
+            return null;
+          },
           onStepFinish: ({ toolCalls, toolResults }) => {
             if (toolCalls && toolCalls.length > 0) {
               for (const tc of toolCalls) {
@@ -198,6 +196,10 @@ KEY PRINCIPLES:
 
         onMessage(result.text, false, true);
       } catch (error) {
+        if (abortSignal?.aborted) {
+          // Server decides the user-facing abort message based on reason
+          return;
+        }
         console.error('Agent execution failed:', error);
         throw error;
       }
@@ -207,27 +209,9 @@ KEY PRINCIPLES:
       const pending = pendingCommands.get(result.id);
       if (pending) {
         pendingCommands.delete(result.id);
-        if (result.success) {
-          pending.resolve(result);
-        } else {
-          pending.reject(new Error(result.error || 'Command failed'));
-        }
-      }
-    },
-
-    handlePermissionResponse(commandId: string, approved: boolean) {
-      const pending = pendingPermissions.get(commandId);
-      if (pending) {
-        pendingPermissions.delete(commandId);
-        pending.resolve(approved);
-      }
-    },
-
-    handlePlanResponse(planId: string, approved: boolean, feedback?: string) {
-      const pending = pendingPlans.get(planId);
-      if (pending) {
-        pendingPlans.delete(planId);
-        pending.resolve({ approved, feedback });
+        // Always resolve — return errors as results so the model can adapt
+        // instead of crashing the agent loop
+        pending.resolve(result);
       }
     },
   };
@@ -245,6 +229,14 @@ function getModel(config: AgentConfig) {
     case 'openai': {
       const openai = createOpenAI({
         apiKey: config.apiKey,
+      });
+      return openai(config.model);
+    }
+
+    case 'openai-compatible': {
+      const openai = createOpenAI({
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
       });
       return openai(config.model);
     }

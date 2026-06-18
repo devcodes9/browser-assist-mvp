@@ -1,29 +1,52 @@
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import ChatInterface from './components/ChatInterface';
-import PermissionGate from './components/PermissionGate';
-import PlanApproval from './components/PlanApproval';
 import ConnectionStatus from './components/ConnectionStatus';
+import Settings from './components/Settings';
+const STORAGE_KEY = 'browserAssist.clientConfig';
 function App() {
     const [connected, setConnected] = useState(false);
     const [messages, setMessages] = useState([]);
-    const [pendingPermission, setPendingPermission] = useState(null);
-    const [pendingPlan, setPendingPlan] = useState(null);
     const [tabId, setTabId] = useState(null);
     const [isProcessing, setIsProcessing] = useState(false);
     const [currentToolCall, setCurrentToolCall] = useState(null);
-    // Get current tab ID on mount
+    const [clientConfig, setClientConfig] = useState(null);
+    const [settingsOpen, setSettingsOpen] = useState(false);
+    const [byokProviders, setByokProviders] = useState([
+        'anthropic',
+        'openai',
+        'azure',
+        'openai-compatible',
+    ]);
+    const [managedAvailable, setManagedAvailable] = useState(false);
+    const [managedModels, setManagedModels] = useState([]);
+    const [activeModel, setActiveModel] = useState(null);
+    const [configError, setConfigError] = useState();
+    // Track latest config in a ref so the connect handler always sends the current one
+    const clientConfigRef = useRef(null);
+    useEffect(() => {
+        clientConfigRef.current = clientConfig;
+    }, [clientConfig]);
+    // Load persisted config + tab id on mount
     useEffect(() => {
         chrome.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
-            if (tab?.id) {
+            if (tab?.id)
                 setTabId(tab.id);
-            }
+        });
+        chrome.storage.local.get(STORAGE_KEY).then((res) => {
+            const saved = res[STORAGE_KEY];
+            if (saved)
+                setClientConfig(saved);
         });
         chrome.runtime.sendMessage({ type: 'sidepanel:ready' }).then((response) => {
-            if (response?.connected) {
+            if (response?.connected)
                 setConnected(true);
-            }
         });
+    }, []);
+    const sendClientConfig = useCallback((config) => {
+        if (!config)
+            return;
+        chrome.runtime.sendMessage({ type: 'config:set', config });
     }, []);
     // Listen for messages from background
     useEffect(() => {
@@ -32,6 +55,8 @@ function App() {
                 case 'backend:connected':
                     setConnected(true);
                     addSystemMessage('Connected to AI backend');
+                    // Re-send config so the backend has it for this connection
+                    sendClientConfig(clientConfigRef.current);
                     break;
                 case 'backend:disconnected':
                     setConnected(false);
@@ -45,19 +70,14 @@ function App() {
                 case 'agent:status':
                     handleAgentStatus(message);
                     break;
-                case 'permission:request':
-                    handlePermissionRequest(message);
-                    break;
-                case 'plan:request':
-                    handlePlanRequest(message);
+                case 'config:state':
+                    handleConfigState(message);
                     break;
             }
         };
         chrome.runtime.onMessage.addListener(handleMessage);
-        return () => {
-            chrome.runtime.onMessage.removeListener(handleMessage);
-        };
-    }, []);
+        return () => chrome.runtime.onMessage.removeListener(handleMessage);
+    }, [sendClientConfig]);
     const handleAgentMessage = (message) => {
         if (message.done) {
             setIsProcessing(false);
@@ -96,10 +116,8 @@ function App() {
             case 'tool_call':
                 setIsProcessing(true);
                 setCurrentToolCall(message.summary || message.toolName || null);
-                // Add a status message for tool visibility
                 if (message.summary) {
                     setMessages((prev) => {
-                        // Replace previous status message if exists
                         const lastMsg = prev[prev.length - 1];
                         if (lastMsg?.role === 'status') {
                             return [
@@ -138,19 +156,18 @@ function App() {
                 break;
         }
     };
-    const handlePermissionRequest = (message) => {
-        setPendingPermission({
-            id: message.command.id,
-            command: message.command,
-            description: message.description,
-        });
-    };
-    const handlePlanRequest = (message) => {
-        setPendingPlan({
-            planId: message.planId,
-            plan: message.plan,
-            summary: message.summary,
-        });
+    const handleConfigState = (message) => {
+        setByokProviders(message.byokProviders);
+        setManagedAvailable(message.managedAvailable);
+        setManagedModels(message.managedModels);
+        if (message.active) {
+            setActiveModel(`${message.active.provider}/${message.active.model}`);
+            setConfigError(undefined);
+        }
+        if (message.error) {
+            setConfigError(message.error);
+            addSystemMessage(`Config error: ${message.error}`);
+        }
     };
     const addAgentMessage = (content) => {
         setMessages((prev) => [
@@ -179,7 +196,11 @@ function App() {
             addSystemMessage('Error: No active tab');
             return;
         }
-        // Add user message to UI
+        if (!clientConfig) {
+            addSystemMessage('No model configured. Open Settings (gear icon).');
+            setSettingsOpen(true);
+            return;
+        }
         setMessages((prev) => [
             ...prev,
             {
@@ -190,7 +211,6 @@ function App() {
             },
         ]);
         setIsProcessing(true);
-        // Get current page info
         let pageUrl = '';
         let pageTitle = '';
         try {
@@ -211,40 +231,10 @@ function App() {
             pageTitle,
         });
     };
-    const handlePermissionResponse = (approved) => {
-        if (!pendingPermission || !tabId)
+    const handleStop = () => {
+        if (!tabId)
             return;
-        chrome.runtime.sendMessage({
-            type: 'permission:response',
-            commandId: pendingPermission.id,
-            approved,
-            tabId,
-        });
-        if (approved) {
-            addSystemMessage(`Approved: ${pendingPermission.description}`);
-        }
-        else {
-            addSystemMessage(`Denied: ${pendingPermission.description}`);
-        }
-        setPendingPermission(null);
-    };
-    const handlePlanResponse = (approved, feedback) => {
-        if (!pendingPlan || !tabId)
-            return;
-        chrome.runtime.sendMessage({
-            type: 'plan:response',
-            planId: pendingPlan.planId,
-            approved,
-            feedback,
-            tabId,
-        });
-        if (approved) {
-            addSystemMessage(`Plan approved: ${pendingPlan.summary}`);
-        }
-        else {
-            addSystemMessage('Plan cancelled');
-        }
-        setPendingPlan(null);
+        chrome.runtime.sendMessage({ type: 'user:stop', tabId });
     };
     const handleClearConversation = () => {
         setMessages([]);
@@ -256,6 +246,12 @@ function App() {
     const handleReconnect = () => {
         chrome.runtime.sendMessage({ type: 'connect:backend' });
     };
-    return (_jsxs("div", { className: "app", children: [_jsx(ConnectionStatus, { connected: connected, onReconnect: handleReconnect, onClear: handleClearConversation, messageCount: messages.filter((m) => m.role !== 'system' && m.role !== 'status').length }), pendingPlan && (_jsx(PlanApproval, { plan: pendingPlan, onApprove: () => handlePlanResponse(true), onReject: (feedback) => handlePlanResponse(false, feedback) })), pendingPermission && (_jsx(PermissionGate, { permission: pendingPermission, onApprove: () => handlePermissionResponse(true), onDeny: () => handlePermissionResponse(false) })), _jsx(ChatInterface, { messages: messages, onSendMessage: handleSendMessage, disabled: !connected, isProcessing: isProcessing, currentToolCall: currentToolCall })] }));
+    const handleSettingsSave = (config) => {
+        setClientConfig(config);
+        chrome.storage.local.set({ [STORAGE_KEY]: config });
+        sendClientConfig(config);
+        setSettingsOpen(false);
+    };
+    return (_jsxs("div", { className: "app", children: [_jsx(ConnectionStatus, { connected: connected, onReconnect: handleReconnect, onClear: handleClearConversation, onOpenSettings: () => setSettingsOpen(true), activeModel: activeModel, messageCount: messages.filter((m) => m.role !== 'system' && m.role !== 'status').length }), _jsx(ChatInterface, { messages: messages, onSendMessage: handleSendMessage, onStop: handleStop, disabled: !connected, isProcessing: isProcessing, currentToolCall: currentToolCall }), settingsOpen && (_jsx(Settings, { initial: clientConfig, byokProviders: byokProviders, managedAvailable: managedAvailable, managedModels: managedModels, activeError: configError, onSave: handleSettingsSave, onClose: () => setSettingsOpen(false) }))] }));
 }
 export default App;

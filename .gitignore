@@ -35,3 +35,5 @@ packages/extension/build/
 # Temporary files
 *.tmp
 .cache/
+# guildly agent workspace (linked project) — unstaged by default
+.guildly/

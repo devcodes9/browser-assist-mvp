@@ -4,6 +4,7 @@ import type { ChatMessage } from '@shared/types';
 interface ChatInterfaceProps {
   messages: ChatMessage[];
   onSendMessage: (content: string) => void;
+  onStop?: () => void;
   disabled?: boolean;
   isProcessing?: boolean;
   currentToolCall?: string | null;
@@ -12,6 +13,7 @@ interface ChatInterfaceProps {
 export default function ChatInterface({
   messages,
   onSendMessage,
+  onStop,
   disabled = false,
   isProcessing = false,
   currentToolCall = null,
@@ -98,21 +100,33 @@ export default function ChatInterface({
           placeholder={
             !disabled
               ? isProcessing
-                ? 'Agent is working...'
+                ? 'Agent is working — press Stop to interrupt'
                 : 'Type a message...'
               : 'Connecting...'
           }
-          disabled={disabled}
+          disabled={disabled || isProcessing}
           className="message-input"
           rows={1}
         />
-        <button
-          type="submit"
-          disabled={disabled || !input.trim() || isProcessing}
-          className="send-button"
-        >
-          {isProcessing ? '...' : 'Send'}
-        </button>
+        {isProcessing ? (
+          <button
+            type="button"
+            onClick={onStop}
+            className="stop-button"
+            disabled={!onStop}
+            title="Stop the agent"
+          >
+            Stop
+          </button>
+        ) : (
+          <button
+            type="submit"
+            disabled={disabled || !input.trim()}
+            className="send-button"
+          >
+            Send
+          </button>
+        )}
       </form>
     </div>
   );

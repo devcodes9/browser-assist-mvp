@@ -1,106 +1,122 @@
 /**
  * Browser Action Tools
- * Tools that the AI agent can use to control the browser
+ * Tools that the AI agent can use to control the browser.
+ *
+ * No per-action approval gates. The user controls execution via the Stop button.
  */
 
 import { tool } from 'ai';
 import { z } from 'zod';
 import type { BrowserCommand, CommandResult } from '../types.js';
 
-interface PlanRequest {
-  planId: string;
-  plan: string[];
-  summary: string;
-}
-
 interface BrowserToolsOptions {
   onCommandRequest: (command: BrowserCommand) => void;
-  onPermissionRequest: (command: BrowserCommand, description: string) => void;
-  onPlanRequest: (plan: PlanRequest) => void;
   pendingCommands: Map<
     string,
     { resolve: (result: CommandResult) => void; reject: (error: Error) => void }
   >;
-  pendingPermissions: Map<
-    string,
-    { resolve: (approved: boolean) => void; reject: (error: Error) => void }
-  >;
-  pendingPlans: Map<
-    string,
-    { resolve: (result: { approved: boolean; feedback?: string }) => void; reject: (error: Error) => void }
-  >;
-  isPlanApproved: () => boolean;
 }
 
-const COMMAND_TIMEOUT = 30_000;
-const PERMISSION_TIMEOUT = 60_000;
-const PLAN_TIMEOUT = 300_000;
+const DEFAULT_TIMEOUT = 15_000;
 const MAX_RETRIES = 2;
 const RETRY_DELAY = 1000;
+const LOOP_FAILURE_THRESHOLD = 3;
+
+// Per-command timeout budgets. Tools that wait for explicit user-supplied
+// timeouts (wait_for_element, observe_mutations) are handled separately
+// in executeCommand via `slack`.
+const TIMEOUTS: Record<string, number> = {
+  screenshot: 10_000,
+  list_tabs: 5_000,
+  switch_tab: 10_000,
+  open_tab: 15_000,
+  close_tab: 5_000,
+  navigate: 30_000,
+  click: 15_000,
+  type: 15_000,
+  extract: 10_000,
+  snapshot: 15_000,
+  discover: 15_000,
+  discover_all: 60_000,
+  get_app_state: 10_000,
+  fetch_from_page: 60_000,
+  get_page_sections: 15_000,
+  get_page_structure: 10_000,
+  extract_table: 10_000,
+  extract_links: 10_000,
+  get_form_fields: 10_000,
+  scroll_to: 10_000,
+  search_page: 10_000,
+  eval_on_page: 20_000,
+};
+
+const TIMEOUT_SLACK = 2_000; // extra time for round-trip on dynamic-timeout tools
+
+function getTimeout(command: BrowserCommand): number {
+  if (command.type === 'wait_for_element' || command.type === 'observe_mutations') {
+    return command.timeout + TIMEOUT_SLACK;
+  }
+  return TIMEOUTS[command.type] ?? DEFAULT_TIMEOUT;
+}
+
+function callSignature(command: BrowserCommand): string {
+  const { id: _id, type, ...rest } = command as BrowserCommand & { id: string };
+  return `${type}:${JSON.stringify(rest)}`;
+}
 
 export function createBrowserTools(options: BrowserToolsOptions) {
-  const {
-    onCommandRequest,
-    onPermissionRequest,
-    onPlanRequest,
-    pendingCommands,
-    pendingPermissions,
-    pendingPlans,
-    isPlanApproved,
-  } = options;
+  const { onCommandRequest, pendingCommands } = options;
 
-  async function requestPermission(
-    command: BrowserCommand,
-    description: string
-  ): Promise<boolean> {
-    if (isPlanApproved()) {
-      return true;
-    }
+  // Loop detector: consecutive failed calls with identical (type, args).
+  // Cleared on any successful call. Read-only repeats with success don't count.
+  const recentFailures: string[] = [];
 
-    return new Promise((resolve, reject) => {
-      pendingPermissions.set(command.id, { resolve, reject });
-      onPermissionRequest(command, description);
-
-      setTimeout(() => {
-        if (pendingPermissions.has(command.id)) {
-          pendingPermissions.delete(command.id);
-          reject(new Error('Permission request timeout'));
-        }
-      }, PERMISSION_TIMEOUT);
-    });
-  }
-
-  async function requestPlanApproval(
-    plan: string[],
-    summary: string
-  ): Promise<{ approved: boolean; feedback?: string }> {
-    const planId = `plan-${Date.now()}`;
-
-    return new Promise((resolve, reject) => {
-      pendingPlans.set(planId, { resolve, reject });
-      onPlanRequest({ planId, plan, summary });
-
-      setTimeout(() => {
-        if (pendingPlans.has(planId)) {
-          pendingPlans.delete(planId);
-          reject(new Error('Plan approval timeout'));
-        }
-      }, PLAN_TIMEOUT);
-    });
-  }
-
-  async function executeCommand(command: BrowserCommand): Promise<CommandResult> {
-    return new Promise((resolve, reject) => {
-      pendingCommands.set(command.id, { resolve, reject });
+  async function rawExecute(command: BrowserCommand): Promise<CommandResult> {
+    const timeout = getTimeout(command);
+    return new Promise((resolve) => {
+      pendingCommands.set(command.id, {
+        resolve,
+        reject: (err) => resolve({ id: command.id, success: false, error: err.message }),
+      });
       onCommandRequest(command);
 
       setTimeout(() => {
         if (pendingCommands.has(command.id)) {
           pendingCommands.delete(command.id);
-          reject(new Error(`Command timeout after ${COMMAND_TIMEOUT / 1000}s: ${command.type}`));
+          resolve({
+            id: command.id,
+            success: false,
+            error: `Command timeout after ${timeout / 1000}s: ${command.type}`,
+          });
         }
-      }, COMMAND_TIMEOUT);
+      }, timeout);
     });
+  }
+
+  async function executeCommand(command: BrowserCommand): Promise<CommandResult> {
+    const sig = callSignature(command);
+
+    if (
+      recentFailures.length >= LOOP_FAILURE_THRESHOLD &&
+      recentFailures.slice(-LOOP_FAILURE_THRESHOLD).every((s) => s === sig)
+    ) {
+      return {
+        id: command.id,
+        success: false,
+        error: `Loop detected: ${command.type} with these arguments has failed ${LOOP_FAILURE_THRESHOLD} times in a row. STOP repeating this call. Change approach: try a different selector, a different tool, navigate to a fresh page, or stop and report the blocker to the user.`,
+      };
+    }
+
+    const result = await rawExecute(command);
+
+    if (result.success) {
+      recentFailures.length = 0;
+    } else {
+      recentFailures.push(sig);
+      if (recentFailures.length > 16) recentFailures.shift();
+    }
+
+    return result;
   }
 
   // Retry wrapper for commands that may fail due to timing (element not found after navigation)
@@ -108,29 +124,28 @@ export function createBrowserTools(options: BrowserToolsOptions) {
     command: BrowserCommand,
     retries = MAX_RETRIES
   ): Promise<CommandResult> {
+    let lastResult: CommandResult | undefined;
     for (let attempt = 0; attempt <= retries; attempt++) {
-      try {
-        const cmd = attempt === 0
-          ? command
-          : { ...command, id: `${command.id}-retry${attempt}` };
-        return await executeCommand(cmd);
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        const isRetryable = msg.includes('not found') || msg.includes('not loaded');
+      const cmd = attempt === 0
+        ? command
+        : { ...command, id: `${command.id}-retry${attempt}` };
+      lastResult = await executeCommand(cmd);
 
-        if (attempt < retries && isRetryable) {
-          await new Promise((r) => setTimeout(r, RETRY_DELAY * (attempt + 1)));
-          continue;
-        }
-        throw error;
+      if (lastResult.success) return lastResult;
+
+      const isRetryable = lastResult.error?.includes('not found') || lastResult.error?.includes('not loaded');
+      if (attempt < retries && isRetryable) {
+        await new Promise((r) => setTimeout(r, RETRY_DELAY * (attempt + 1)));
+        continue;
       }
+      return lastResult;
     }
-    throw new Error('Unreachable');
+    return lastResult!;
   }
 
   return {
     navigate: tool({
-      description: 'Navigate the browser to a specific URL',
+      description: 'Navigate the browser to a specific URL.',
       parameters: z.object({
         url: z.string().describe('The URL to navigate to'),
       }),
@@ -140,18 +155,12 @@ export function createBrowserTools(options: BrowserToolsOptions) {
           id: `nav-${Date.now()}`,
           url,
         };
-
-        const approved = await requestPermission(command, `Navigate to ${url}`);
-        if (!approved) {
-          return { success: false, error: 'Permission denied by user' };
-        }
-
         return await executeCommand(command);
       },
     }),
 
     click: tool({
-      description: 'Click an element on the page using a CSS selector',
+      description: 'Click an element on the page using a CSS selector.',
       parameters: z.object({
         selector: z.string().describe('CSS selector for the element to click'),
       }),
@@ -161,18 +170,12 @@ export function createBrowserTools(options: BrowserToolsOptions) {
           id: `click-${Date.now()}`,
           selector,
         };
-
-        const approved = await requestPermission(command, `Click element: ${selector}`);
-        if (!approved) {
-          return { success: false, error: 'Permission denied by user' };
-        }
-
         return await executeWithRetry(command);
       },
     }),
 
     type: tool({
-      description: 'Type text into an input field using a CSS selector',
+      description: 'Type text into an input field using a CSS selector.',
       parameters: z.object({
         selector: z.string().describe('CSS selector for the input element'),
         text: z.string().describe('Text to type into the element'),
@@ -184,12 +187,6 @@ export function createBrowserTools(options: BrowserToolsOptions) {
           selector,
           text,
         };
-
-        const approved = await requestPermission(command, `Type "${text}" into ${selector}`);
-        if (!approved) {
-          return { success: false, error: 'Permission denied by user' };
-        }
-
         return await executeWithRetry(command);
       },
     }),
@@ -340,16 +337,14 @@ export function createBrowserTools(options: BrowserToolsOptions) {
         selector: z.string().describe('CSS selector to wait for'),
         timeout: z
           .number()
-          .optional()
-          .default(5000)
-          .describe('Max time to wait in milliseconds (default 5000)'),
+          .describe('Max time to wait in milliseconds (use 5000 for default)'),
       }),
       execute: async ({ selector, timeout }) => {
         const command: BrowserCommand = {
           type: 'wait_for_element',
           id: `wait-${Date.now()}`,
           selector,
-          timeout: timeout ?? 5000,
+          timeout: timeout || 5000,
         };
         return await executeCommand(command);
       },
@@ -357,7 +352,7 @@ export function createBrowserTools(options: BrowserToolsOptions) {
 
     eval_on_page: tool({
       description:
-        'Execute custom JavaScript on the page. Use this for complex data extraction, checking state, or logic that cannot be done with other tools. Requires approval.',
+        'Execute custom JavaScript on the page. Use this for complex data extraction, checking state, or logic that cannot be done with other tools.',
       parameters: z.object({
         code: z
           .string()
@@ -369,15 +364,6 @@ export function createBrowserTools(options: BrowserToolsOptions) {
           id: `eval-${Date.now()}`,
           code,
         };
-
-        const approved = await requestPermission(
-          command,
-          `Execute JavaScript: ${code.slice(0, 80)}${code.length > 80 ? '...' : ''}`
-        );
-        if (!approved) {
-          return { success: false, error: 'Permission denied by user' };
-        }
-
         return await executeCommand(command);
       },
     }),
@@ -410,31 +396,25 @@ export function createBrowserTools(options: BrowserToolsOptions) {
 
     fetch_from_page: tool({
       description:
-        'Make an authenticated HTTP request from the page context. Uses the page\'s cookies and session automatically. Useful for calling APIs that require authentication without any setup. Requires approval.',
+        'Make an authenticated HTTP request from the page context. Uses the page\'s cookies and session automatically. Useful for calling APIs that require authentication without any setup.',
       parameters: z.object({
         url: z.string().describe('URL to fetch'),
-        method: z.string().optional().default('GET').describe('HTTP method (GET, POST, etc.)'),
-        headers: z.record(z.string()).optional().describe('Optional request headers'),
-        body: z.string().optional().describe('Optional request body (for POST/PUT)'),
+        method: z.string().describe('HTTP method (GET, POST, PUT, DELETE)'),
+        headers: z.string().describe('JSON-encoded request headers, or empty string for none'),
+        body: z.string().describe('Request body for POST/PUT, or empty string for none'),
       }),
       execute: async ({ url, method, headers, body }) => {
+        const parsedHeaders = headers
+          ? (() => { try { return JSON.parse(headers); } catch { return undefined; } })()
+          : undefined;
         const command: BrowserCommand = {
           type: 'fetch_from_page',
           id: `fetch-${Date.now()}`,
           url,
-          method: method ?? 'GET',
-          headers,
-          body,
+          method: method || 'GET',
+          headers: parsedHeaders,
+          body: body || undefined,
         };
-
-        const approved = await requestPermission(
-          command,
-          `Fetch ${method ?? 'GET'} ${url}`
-        );
-        if (!approved) {
-          return { success: false, error: 'Permission denied by user' };
-        }
-
         return await executeCommand(command);
       },
     }),
@@ -443,15 +423,15 @@ export function createBrowserTools(options: BrowserToolsOptions) {
       description:
         'Watch for DOM changes on the page (or a specific element). Useful after clicking a button or submitting a form to know when the page has finished updating. Returns a summary of what changed.',
       parameters: z.object({
-        selector: z.string().optional().describe('CSS selector to observe (default: entire page)'),
-        timeout: z.number().optional().default(5000).describe('Max time to wait for changes in ms (default 5000)'),
+        selector: z.string().describe('CSS selector to observe, or empty string for entire page'),
+        timeout: z.number().describe('Max time to wait for changes in ms (use 5000 for default)'),
       }),
       execute: async ({ selector, timeout }) => {
         const command: BrowserCommand = {
           type: 'observe_mutations',
           id: `observe-${Date.now()}`,
-          selector,
-          timeout: timeout ?? 5000,
+          selector: selector || undefined,
+          timeout: timeout || 5000,
         };
         return await executeCommand(command);
       },
@@ -470,36 +450,60 @@ export function createBrowserTools(options: BrowserToolsOptions) {
       },
     }),
 
-    show_plan: tool({
-      description:
-        'Show a plan to the user and wait for approval before executing actions. Call this FIRST before taking any actions. Once approved, all subsequent navigate/click/type actions will auto-execute without individual permission prompts. Call again if you need to deviate from the original plan.',
-      parameters: z.object({
-        plan: z
-          .array(z.string())
-          .describe('List of actions you plan to take'),
-        summary: z
-          .string()
-          .describe('Brief one-line summary of what you will accomplish'),
-      }),
-      execute: async ({ plan, summary }) => {
-        const result = await requestPlanApproval(plan, summary);
+    list_tabs: tool({
+      description: 'List all open browser tabs. Returns tab ID, title, URL, and whether it is active.',
+      parameters: z.object({}),
+      execute: async () => {
+        const command: BrowserCommand = {
+          type: 'list_tabs',
+          id: `tabs-${Date.now()}`,
+        };
+        return await executeCommand(command);
+      },
+    }),
 
-        if (result.approved) {
-          return {
-            success: true,
-            approved: true,
-            message: 'Plan approved. You can now execute the actions.',
-          };
-        } else {
-          return {
-            success: true,
-            approved: false,
-            feedback: result.feedback,
-            message: result.feedback
-              ? `Plan not approved. User feedback: ${result.feedback}`
-              : 'Plan not approved by user.',
-          };
-        }
+    switch_tab: tool({
+      description: 'Switch to a different browser tab by its tab ID. Use list_tabs first to get tab IDs.',
+      parameters: z.object({
+        tabId: z.number().describe('The tab ID to switch to (from list_tabs)'),
+      }),
+      execute: async ({ tabId }) => {
+        const command: BrowserCommand = {
+          type: 'switch_tab',
+          id: `swtab-${Date.now()}`,
+          tabId,
+        };
+        return await executeCommand(command);
+      },
+    }),
+
+    open_tab: tool({
+      description: 'Open a new browser tab with a URL. Returns the new tab ID.',
+      parameters: z.object({
+        url: z.string().describe('The URL to open in the new tab'),
+      }),
+      execute: async ({ url }) => {
+        const command: BrowserCommand = {
+          type: 'open_tab',
+          id: `newtab-${Date.now()}`,
+          url,
+        };
+        return await executeCommand(command);
+      },
+    }),
+
+    close_tab: tool({
+      description: 'Close a browser tab by its tab ID. Cannot close the last remaining tab.',
+      parameters: z.object({
+        tabId: z.number().describe('The tab ID to close (from list_tabs)'),
+      }),
+      execute: async ({ tabId }) => {
+        const command: BrowserCommand = {
+          type: 'close_tab',
+          id: `closetab-${Date.now()}`,
+          tabId,
+        };
+        return await executeCommand(command);
       },
     }),
   };

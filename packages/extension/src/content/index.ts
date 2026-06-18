@@ -117,7 +117,7 @@ async function executeNavigate(id: string, url: string): Promise<CommandResult> 
   }
 }
 
-// Click element
+// Click element — dispatches full mouse event sequence like a real user
 async function executeClick(id: string, selector: string): Promise<CommandResult> {
   const element = document.querySelector(selector) || deepQuerySelector(selector);
 
@@ -131,12 +131,32 @@ async function executeClick(id: string, selector: string): Promise<CommandResult
 
   element.scrollIntoView({ behavior: 'smooth', block: 'center' });
   await new Promise((resolve) => setTimeout(resolve, 300));
-  element.click();
+
+  // Get element center coordinates for realistic mouse events
+  const rect = element.getBoundingClientRect();
+  const x = rect.left + rect.width / 2;
+  const y = rect.top + rect.height / 2;
+
+  const eventInit: MouseEventInit = {
+    bubbles: true,
+    cancelable: true,
+    view: window,
+    clientX: x,
+    clientY: y,
+  };
+
+  // Full mouse event sequence — this works with custom handlers that listen
+  // for mousedown/mouseup instead of click (e.g., drag-and-drop UIs, canvas apps)
+  element.dispatchEvent(new MouseEvent('pointerdown', { ...eventInit, pointerId: 1 } as any));
+  element.dispatchEvent(new MouseEvent('mousedown', eventInit));
+  element.dispatchEvent(new MouseEvent('pointerup', { ...eventInit, pointerId: 1 } as any));
+  element.dispatchEvent(new MouseEvent('mouseup', eventInit));
+  element.dispatchEvent(new MouseEvent('click', eventInit));
 
   return { id, success: true, data: { selector } };
 }
 
-// Type text into element
+// Type text into element — works with inputs, textareas, contenteditable, and rich editors
 async function executeType(
   id: string,
   selector: string,
@@ -148,21 +168,13 @@ async function executeType(
     throw new Error(`Element not found: ${selector}`);
   }
 
-  if (
-    !(element instanceof HTMLInputElement) &&
-    !(element instanceof HTMLTextAreaElement) &&
-    !element.getAttribute('contenteditable')
-  ) {
-    throw new Error(`Element is not typeable: ${selector}`);
-  }
-
-  element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const htmlEl = element as HTMLElement;
+  htmlEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
   await new Promise((resolve) => setTimeout(resolve, 300));
-
-  (element as HTMLElement).focus();
+  htmlEl.focus();
 
   if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
-    // Use native setter for React/framework compatibility
+    // Standard form inputs — use native setter for React/framework compatibility
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, 'value'
     )?.set || Object.getOwnPropertyDescriptor(
@@ -178,9 +190,27 @@ async function executeType(
     element.dispatchEvent(new Event('input', { bubbles: true }));
     element.dispatchEvent(new Event('change', { bubbles: true }));
   } else {
-    // contenteditable
-    (element as HTMLElement).textContent = text;
-    element.dispatchEvent(new Event('input', { bubbles: true }));
+    // Rich text editors, contenteditable, etc.
+    const isContentEditable = htmlEl.isContentEditable ||
+      htmlEl.getAttribute('contenteditable') === 'true' ||
+      htmlEl.getAttribute('role') === 'textbox';
+
+    if (isContentEditable) {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(htmlEl);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+    }
+
+    // execCommand('insertText') simulates real typing
+    const success = document.execCommand('insertText', false, text);
+
+    if (!success) {
+      htmlEl.textContent = text;
+      htmlEl.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText', data: text }));
+      htmlEl.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+    }
   }
 
   return { id, success: true, data: { selector, text } };

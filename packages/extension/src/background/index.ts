@@ -84,9 +84,8 @@ function connectWebSocket() {
 function handleBackendMessage(message: WSMessage) {
   switch (message.type) {
     case 'agent:message':
-    case 'permission:request':
-    case 'plan:request':
     case 'agent:status':
+    case 'config:state':
       broadcastToSidepanel(message);
       break;
 
@@ -114,9 +113,33 @@ async function handleCommandRequest(message: CommandRequestMessage) {
       throw new Error('No active tab found');
     }
 
-    // Handle screenshot directly in background (chrome.tabs.captureVisibleTab only works here)
+    // Handle commands that run in background (not content script)
     if (command.type === 'screenshot') {
       const result = await executeScreenshot(command.id);
+      sendToBackend({ type: 'command:response', result, tabId: tab.id });
+      return;
+    }
+
+    if (command.type === 'list_tabs') {
+      const result = await executeListTabs(command.id);
+      sendToBackend({ type: 'command:response', result, tabId: tab.id });
+      return;
+    }
+
+    if (command.type === 'switch_tab') {
+      const result = await executeSwitchTab(command.id, command.tabId);
+      sendToBackend({ type: 'command:response', result, tabId: command.tabId });
+      return;
+    }
+
+    if (command.type === 'open_tab') {
+      const result = await executeOpenTab(command.id, command.url);
+      sendToBackend({ type: 'command:response', result, tabId: tab.id });
+      return;
+    }
+
+    if (command.type === 'close_tab') {
+      const result = await executeCloseTab(command.id, command.tabId);
       sendToBackend({ type: 'command:response', result, tabId: tab.id });
       return;
     }
@@ -180,6 +203,85 @@ async function executeScreenshot(id: string) {
   }
 }
 
+async function executeListTabs(id: string) {
+  try {
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    const tabData = tabs.map((tab) => ({
+      tabId: tab.id,
+      title: tab.title || '',
+      url: tab.url || '',
+      active: tab.active,
+      index: tab.index,
+    }));
+    return { id, success: true, data: { tabs: tabData } };
+  } catch (error) {
+    return { id, success: false, error: error instanceof Error ? error.message : 'Failed to list tabs' };
+  }
+}
+
+async function executeSwitchTab(id: string, tabId: number) {
+  try {
+    await chrome.tabs.update(tabId, { active: true });
+    const tab = await chrome.tabs.get(tabId);
+    // Inject content script into the new tab if needed
+    if (tab.id) {
+      try {
+        await chrome.tabs.sendMessage(tab.id, { type: 'ping' });
+      } catch {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content.js'],
+        });
+      }
+    }
+    return {
+      id,
+      success: true,
+      data: { tabId: tab.id, title: tab.title || '', url: tab.url || '' },
+    };
+  } catch (error) {
+    return { id, success: false, error: error instanceof Error ? error.message : 'Failed to switch tab' };
+  }
+}
+
+async function executeOpenTab(id: string, url: string) {
+  try {
+    const tab = await chrome.tabs.create({ url, active: true });
+    // Wait a moment for the page to start loading, then inject content script
+    await new Promise((r) => setTimeout(r, 500));
+    if (tab.id) {
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content.js'],
+        });
+      } catch {
+        // Page might not be ready yet, content script will be injected on demand
+      }
+    }
+    return {
+      id,
+      success: true,
+      data: { tabId: tab.id, title: tab.title || '', url: tab.url || '' },
+    };
+  } catch (error) {
+    return { id, success: false, error: error instanceof Error ? error.message : 'Failed to open tab' };
+  }
+}
+
+async function executeCloseTab(id: string, tabId: number) {
+  try {
+    const tabs = await chrome.tabs.query({ currentWindow: true });
+    if (tabs.length <= 1) {
+      return { id, success: false, error: 'Cannot close the last tab' };
+    }
+    await chrome.tabs.remove(tabId);
+    return { id, success: true, data: { closedTabId: tabId } };
+  } catch (error) {
+    return { id, success: false, error: error instanceof Error ? error.message : 'Failed to close tab' };
+  }
+}
+
 function sendToBackend(message: WSMessage) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     console.error('[Background] Cannot send: WebSocket not connected');
@@ -213,9 +315,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       sendToBackend(message);
       break;
 
-    case 'permission:response':
-    case 'plan:response':
+    case 'user:stop':
     case 'conversation:clear':
+    case 'config:set':
       sendToBackend(message);
       break;
 

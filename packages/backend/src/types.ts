@@ -27,7 +27,11 @@ export type BrowserCommand =
   | GetAppStateCommand
   | FetchFromPageCommand
   | ObserveMutationsCommand
-  | GetPageSectionsCommand;
+  | GetPageSectionsCommand
+  | ListTabsCommand
+  | SwitchTabCommand
+  | OpenTabCommand
+  | CloseTabCommand;
 
 export interface NavigateCommand {
   type: 'navigate';
@@ -146,6 +150,29 @@ export interface GetPageSectionsCommand {
   id: string;
 }
 
+export interface ListTabsCommand {
+  type: 'list_tabs';
+  id: string;
+}
+
+export interface SwitchTabCommand {
+  type: 'switch_tab';
+  id: string;
+  tabId: number;
+}
+
+export interface OpenTabCommand {
+  type: 'open_tab';
+  id: string;
+  url: string;
+}
+
+export interface CloseTabCommand {
+  type: 'close_tab';
+  id: string;
+  tabId: number;
+}
+
 // ============================================================================
 // Command Results
 // ============================================================================
@@ -164,14 +191,13 @@ export interface CommandResult {
 export type WSMessage =
   | ExtensionReadyMessage
   | UserMessageFromExtension
+  | UserStopMessage
+  | ClientConfigMessage
+  | ConfigStateMessage
   | AgentMessageToExtension
   | AgentStatusMessage
   | CommandRequestMessage
   | CommandResponseMessage
-  | PermissionRequestMessage
-  | PermissionResponseMessage
-  | PlanRequestMessage
-  | PlanResponseMessage
   | ConversationClearMessage
   | HeartbeatMessage
   | PongMessage;
@@ -196,10 +222,8 @@ export interface CommandResponseMessage {
   tabId: number;
 }
 
-export interface PermissionResponseMessage {
-  type: 'permission:response';
-  commandId: string;
-  approved: boolean;
+export interface UserStopMessage {
+  type: 'user:stop';
   tabId: number;
 }
 
@@ -232,43 +256,67 @@ export interface CommandRequestMessage {
   command: BrowserCommand;
 }
 
-export interface PermissionRequestMessage {
-  type: 'permission:request';
-  command: BrowserCommand;
-  description: string;
-}
-
 export interface HeartbeatMessage {
   type: 'heartbeat';
-}
-
-// Plan approval messages
-export interface PlanRequestMessage {
-  type: 'plan:request';
-  planId: string;
-  plan: string[];
-  summary: string;
-}
-
-export interface PlanResponseMessage {
-  type: 'plan:response';
-  planId: string;
-  approved: boolean;
-  feedback?: string;
 }
 
 // ============================================================================
 // Agent Configuration
 // ============================================================================
 
+export type AgentProvider = 'anthropic' | 'openai' | 'azure' | 'openai-compatible';
+
 export interface AgentConfig {
-  provider: 'anthropic' | 'openai' | 'azure' | 'custom';
+  provider: AgentProvider;
   model: string;
   apiKey: string;
+  baseURL?: string;
   maxSteps?: number;
   azureResourceName?: string;
   azureDeployment?: string;
   azureApiVersion?: string;
+}
+
+// ============================================================================
+// Client Config (BYOK + Managed mode)
+// ============================================================================
+
+export type ClientMode = 'byok' | 'managed';
+
+export interface ClientConfig {
+  mode: ClientMode;
+  provider?: AgentProvider;
+  model?: string;
+  apiKey?: string;
+  baseURL?: string;
+  azureResourceName?: string;
+  azureDeployment?: string;
+  azureApiVersion?: string;
+  licenseKey?: string;
+  managedModel?: string;
+}
+
+export interface ClientConfigMessage {
+  type: 'config:set';
+  config: ClientConfig;
+}
+
+export interface ManagedModelOption {
+  id: string;
+  label: string;
+}
+
+export interface ConfigStateMessage {
+  type: 'config:state';
+  managedAvailable: boolean;
+  managedModels: ManagedModelOption[];
+  byokProviders: AgentProvider[];
+  active?: {
+    mode: ClientMode;
+    provider: AgentProvider;
+    model: string;
+  };
+  error?: string;
 }
 
 // ============================================================================
@@ -297,10 +345,4 @@ export interface ChatMessage {
   timestamp: number;
   toolName?: string;
   status?: 'thinking' | 'tool_call' | 'tool_result' | 'error';
-}
-
-export interface PendingPermission {
-  id: string;
-  command: BrowserCommand;
-  description: string;
 }
