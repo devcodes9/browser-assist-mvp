@@ -37,3 +37,6 @@ packages/extension/build/
 .cache/
 # guildly agent workspace (linked project) — unstaged by default
 .guildly/
+
+# Review/QA screenshots are PR artifacts, not source — keep them out of the repo
+packages/extension/docs/screenshots/

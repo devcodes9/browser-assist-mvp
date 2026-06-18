@@ -284,7 +284,7 @@ function App() {
   };
 
   return (
-    <div className="app">
+    <div className="flex h-full flex-col bg-background">
       <ConnectionStatus
         connected={connected}
         onReconnect={handleReconnect}
