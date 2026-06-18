@@ -201,6 +201,6 @@ function App() {
     const handleReconnect = () => {
         chrome.runtime.sendMessage({ type: 'connect:backend' });
     };
-    return (_jsxs("div", { className: "app", children: [_jsx(ConnectionStatus, { connected: connected, onReconnect: handleReconnect }), pendingPlan && (_jsx(PlanApproval, { plan: pendingPlan, onApprove: () => handlePlanResponse(true), onReject: (feedback) => handlePlanResponse(false, feedback) })), pendingPermission && (_jsx(PermissionGate, { permission: pendingPermission, onApprove: () => handlePermissionResponse(true), onDeny: () => handlePermissionResponse(false) })), _jsx(ChatInterface, { messages: messages, onSendMessage: handleSendMessage, disabled: !connected })] }));
+    return (_jsxs("div", { className: "flex h-full flex-col bg-background", children: [_jsx(ConnectionStatus, { connected: connected, onReconnect: handleReconnect }), pendingPlan && (_jsx(PlanApproval, { plan: pendingPlan, onApprove: () => handlePlanResponse(true), onReject: (feedback) => handlePlanResponse(false, feedback) })), pendingPermission && (_jsx(PermissionGate, { permission: pendingPermission, onApprove: () => handlePermissionResponse(true), onDeny: () => handlePermissionResponse(false) })), _jsx(ChatInterface, { messages: messages, onSendMessage: handleSendMessage, disabled: !connected })] }));
 }
 export default App;
