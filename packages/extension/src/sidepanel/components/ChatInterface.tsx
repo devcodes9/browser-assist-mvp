@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { TerminalSquare, ArrowUp, User } from 'lucide-react';
+import { Sparkles, ArrowUp, User } from 'lucide-react';
 import type { ChatMessage } from '@shared/types';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -61,7 +61,7 @@ export default function ChatInterface({
         {messages.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center px-6 text-center">
             <div className="mb-3.5 flex size-11 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-              <TerminalSquare className="size-[21px]" />
+              <Sparkles className="size-[21px]" />
             </div>
             <h2 className="text-[17px] font-semibold tracking-tight">
               How can I help with this page?
@@ -155,7 +155,7 @@ function MessageRow({ message }: { message: ChatMessage }) {
         {isUser ? (
           <User className="size-3.5" />
         ) : (
-          <TerminalSquare className="size-3.5" />
+          <Sparkles className="size-3.5" />
         )}
       </div>
       <div
