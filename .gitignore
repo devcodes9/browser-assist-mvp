@@ -35,3 +35,6 @@ packages/extension/build/
 # Temporary files
 *.tmp
 .cache/
+
+# Review/QA screenshots are PR artifacts, not source — keep them out of the repo
+packages/extension/docs/screenshots/
