@@ -1,4 +1,4 @@
-import { TerminalSquare, RefreshCw } from 'lucide-react';
+import { Sparkles, RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
@@ -14,7 +14,7 @@ export default function ConnectionStatus({
   return (
     <header className="flex items-center gap-2.5 border-b border-border px-3.5 py-2.5">
       <div className="flex size-7 items-center justify-center rounded-md bg-primary text-primary-foreground">
-        <TerminalSquare className="size-4" />
+        <Sparkles className="size-4" />
       </div>
 
       <div className="min-w-0">
