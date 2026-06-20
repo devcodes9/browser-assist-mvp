@@ -1,9 +1,10 @@
 /**
  * AI SDK Agent
- * Handles reasoning, planning, and tool orchestration
+ * Handles reasoning and tool orchestration. No approval gating —
+ * the user controls execution via the Stop button.
  */
 
-import { generateText } from 'ai';
+import { generateText, NoSuchToolError } from 'ai';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createAzure } from '@ai-sdk/azure';
@@ -16,17 +17,10 @@ interface ConversationMessage {
   content: string;
 }
 
-interface PlanRequest {
-  planId: string;
-  plan: string[];
-  summary: string;
-}
-
 interface AgentCallbacks {
   onMessage: (content: string, streaming?: boolean, done?: boolean) => void;
+  onStatus: (status: 'thinking' | 'tool_call' | 'tool_result' | 'idle' | 'error', toolName?: string, toolArgs?: Record<string, unknown>, summary?: string) => void;
   onCommandRequest: (command: BrowserCommand) => void;
-  onPermissionRequest: (command: BrowserCommand, description: string) => void;
-  onPlanRequest: (plan: PlanRequest) => void;
 }
 
 interface PendingCommand {
@@ -34,166 +28,195 @@ interface PendingCommand {
   reject: (error: Error) => void;
 }
 
-interface PendingPermission {
-  resolve: (approved: boolean) => void;
-  reject: (error: Error) => void;
-}
-
-interface PendingPlan {
-  resolve: (result: { approved: boolean; feedback?: string }) => void;
-  reject: (error: Error) => void;
-}
+// Human-readable labels for tool calls shown in the UI
+const TOOL_LABELS: Record<string, string> = {
+  navigate: 'Navigating',
+  click: 'Clicking element',
+  type: 'Typing text',
+  extract: 'Extracting content',
+  snapshot: 'Reading page',
+  discover: 'Finding interactive elements',
+  screenshot: 'Taking screenshot',
+  get_page_structure: 'Analyzing page structure',
+  extract_table: 'Extracting table data',
+  extract_links: 'Extracting links',
+  get_form_fields: 'Analyzing form fields',
+  scroll_to: 'Scrolling',
+  search_page: 'Searching page',
+  eval_on_page: 'Running JavaScript',
+  wait_for_element: 'Waiting for element',
+  discover_all: 'Scanning entire page',
+  get_app_state: 'Reading app state',
+  fetch_from_page: 'Making authenticated request',
+  observe_mutations: 'Watching for page changes',
+  get_page_sections: 'Reading page sections',
+  list_tabs: 'Listing browser tabs',
+  switch_tab: 'Switching tab',
+  open_tab: 'Opening new tab',
+  close_tab: 'Closing tab',
+};
 
 export function createAgent(options: {
   config: AgentConfig;
   conversationHistory: ConversationMessage[];
-  isPlanApproved: () => boolean;
+  abortSignal?: AbortSignal;
   onMessage: AgentCallbacks['onMessage'];
+  onStatus: AgentCallbacks['onStatus'];
   onCommandRequest: AgentCallbacks['onCommandRequest'];
-  onPermissionRequest: AgentCallbacks['onPermissionRequest'];
-  onPlanRequest: AgentCallbacks['onPlanRequest'];
 }) {
   const {
     config,
     conversationHistory,
-    isPlanApproved,
+    abortSignal,
     onMessage,
+    onStatus,
     onCommandRequest,
-    onPermissionRequest,
-    onPlanRequest,
   } = options;
 
-  // Pending command/permission/plan promises
   const pendingCommands = new Map<string, PendingCommand>();
-  const pendingPermissions = new Map<string, PendingPermission>();
-  const pendingPlans = new Map<string, PendingPlan>();
 
-  // Get AI model based on config
   const model = getModel(config);
 
-  // Create browser tools
   const browserTools = createBrowserTools({
     onCommandRequest,
-    onPermissionRequest,
-    onPlanRequest,
     pendingCommands,
-    pendingPermissions,
-    pendingPlans,
-    isPlanApproved,
   });
 
-  // Load MCP tools (if configured)
   const mcpTools = loadMCPTools();
 
-  // Combine all tools
   const tools = {
     ...browserTools,
     ...mcpTools,
   };
 
-  // System prompt (constant across conversation)
-  const systemPrompt = `You are a browser automation assistant. You help users automate browser tasks.
+  const systemPrompt = `You are a browser automation agent. The user gives you a task; you execute it directly using browser tools. The user can press Stop at any time, so don't ask for approval — just act.
 
-You have access to browser control tools:
-- show_plan(plan, summary): ALWAYS call this FIRST to show your plan and get user approval
-- discover(): Find all interactive elements with CSS selectors
-- navigate(url): Navigate to a URL
-- click(selector): Click an element
-- type(selector, text): Type text into an input field
-- extract(selector): Extract content from an element
-- snapshot(): Get current page text content
-- screenshot(): Take a screenshot (for vision models)
+# Style
+- Lead with action. Briefly state what you're about to do in one short line if it's non-trivial, then do it.
+- Never ask "Would you like me to…" or "Should I…". Just proceed.
+- When you finish, report the result in 1-3 lines. Lead with the answer.
+- If you genuinely cannot proceed (need credentials, ambiguous target, page broken), say so concisely and stop.
 
-CRITICAL WORKFLOW:
-1. When user asks for a task, FIRST call show_plan() with your planned steps
-2. Wait for approval before taking any actions
-3. Once approved, execute your plan - actions will auto-approve
-4. If you need to deviate significantly from the plan, call show_plan() again
+# Loop
+1. Read the page before acting. Use get_page_sections() for content or discover() / discover_all() for interactive elements. Never guess selectors.
+2. Act. Use the right tool — navigate, click, type, fetch_from_page, etc.
+3. Verify. After navigation use wait_for_element(); after a click that triggers async UI use observe_mutations(). Don't assume success.
+4. Adapt. If a step fails, try ONE alternative. If that fails, stop and explain.
 
-Example:
-User: "Add a todo item"
-You: Call show_plan(["Navigate to todo app", "Click add button", "Type 'Buy groceries'"], "Add a new todo item")
-[After approval] Execute the steps
+# Tools
 
-Guidelines:
-- Always show plan first for multi-step tasks
-- Use discover() to get selectors before clicking
-- Call show_plan() again if encountering unexpected situations
-- Remember previous actions in this conversation`;
+Reading:
+- get_page_sections(): semantic content by section — usually the best first read.
+- discover(): interactive elements in viewport with CSS selectors.
+- discover_all(): scrolls the whole page; use when target may be below the fold or lazy-loaded.
+- extract_links(): links with surrounding context.
+- search_page(query): find text on the current page.
+- get_form_fields(): form fields, labels, current values.
+- extract(selector) / extract_table(selector): scoped text or tabular data.
+- get_page_structure(): heading/landmark outline.
+- snapshot(): raw page text fallback.
+- screenshot(): visual capture.
+- get_app_state(): Next.js / React / Vue / Redux / JSON-LD state without scraping the DOM.
+
+Navigation & tabs:
+- navigate(url), scroll_to(target).
+- list_tabs(), switch_tab(tabId), open_tab(url), close_tab(tabId).
+
+Acting:
+- click(selector), type(selector, text).
+
+Advanced:
+- wait_for_element(selector, timeout).
+- observe_mutations(selector, timeout).
+- fetch_from_page(url, method, headers, body): authenticated HTTP from the page's session.
+- eval_on_page(code): arbitrary JS when no dedicated tool fits.
+
+# Failure & dead ends
+- If a page is broken (404, maintenance, access denied), don't keep poking it. Move on or report.
+- Don't retry the same failing action. Diagnose (wrong selector? page not loaded? wrong tab?) and change something, or stop.
+- For multi-site tasks: if one site is down, skip it and continue.
+
+# Research & comparison
+- Use open_tab() + switch_tab() to gather from multiple sources in parallel-ish.
+- Use extract_links() to find subpages worth visiting. Try different search terms before declaring "not found".`;
 
   return {
     async run(userMessage: string) {
       try {
-        console.log('🤖 Running agent with message:', userMessage);
-        console.log('📜 Conversation history length:', conversationHistory.length);
-
-        // Build messages from conversation history + current message
         const messages = [
-          // Include previous conversation for context
           ...conversationHistory.map((msg) => ({
             role: msg.role as 'user' | 'assistant',
             content: msg.content,
           })),
-          // Add current user message
           {
             role: 'user' as const,
             content: userMessage,
           },
         ];
 
-        // Use generateText with conversation history
         const result = await generateText({
           model,
           system: systemPrompt,
           messages,
           tools,
           maxSteps: config.maxSteps,
+          abortSignal,
+          // Repair malformed tool calls — most commonly Llama/Groq sending
+          // `null` or `""` for zero-parameter tools instead of `{}`.
+          experimental_repairToolCall: async ({ toolCall, error }) => {
+            if (NoSuchToolError.isInstance(error)) return null;
+
+            const argsStr = typeof toolCall.args === 'string'
+              ? toolCall.args.trim()
+              : JSON.stringify(toolCall.args);
+
+            if (argsStr === '' || argsStr === 'null' || argsStr === 'undefined' || toolCall.args == null) {
+              return {
+                toolCallType: 'function',
+                toolCallId: toolCall.toolCallId,
+                toolName: toolCall.toolName,
+                args: '{}',
+              };
+            }
+
+            return null;
+          },
+          onStepFinish: ({ toolCalls, toolResults }) => {
+            if (toolCalls && toolCalls.length > 0) {
+              for (const tc of toolCalls) {
+                const label = TOOL_LABELS[tc.toolName] || tc.toolName;
+                onStatus('tool_call', tc.toolName, tc.args as Record<string, unknown>, label);
+              }
+            }
+            if (toolResults && toolResults.length > 0) {
+              onStatus('thinking');
+            }
+          },
         });
 
-        // Send final response
         onMessage(result.text, false, true);
-
-        console.log('✓ Agent finished');
       } catch (error) {
+        if (abortSignal?.aborted) {
+          // Server decides the user-facing abort message based on reason
+          return;
+        }
         console.error('Agent execution failed:', error);
         throw error;
       }
     },
 
-    // Handle command response from extension
     handleCommandResponse(result: CommandResult) {
       const pending = pendingCommands.get(result.id);
       if (pending) {
         pendingCommands.delete(result.id);
-        if (result.success) {
-          pending.resolve(result);
-        } else {
-          pending.reject(new Error(result.error || 'Command failed'));
-        }
-      }
-    },
-
-    // Handle permission response from user
-    handlePermissionResponse(commandId: string, approved: boolean) {
-      const pending = pendingPermissions.get(commandId);
-      if (pending) {
-        pendingPermissions.delete(commandId);
-        pending.resolve(approved);
-      }
-    },
-
-    // Handle plan approval response from user
-    handlePlanResponse(planId: string, approved: boolean, feedback?: string) {
-      const pending = pendingPlans.get(planId);
-      if (pending) {
-        pendingPlans.delete(planId);
-        pending.resolve({ approved, feedback });
+        // Always resolve — return errors as results so the model can adapt
+        // instead of crashing the agent loop
+        pending.resolve(result);
       }
     },
   };
 }
 
-// Get AI model instance based on config
 function getModel(config: AgentConfig) {
   switch (config.provider) {
     case 'anthropic': {
@@ -210,14 +233,20 @@ function getModel(config: AgentConfig) {
       return openai(config.model);
     }
 
+    case 'openai-compatible': {
+      const openai = createOpenAI({
+        apiKey: config.apiKey,
+        baseURL: config.baseURL,
+      });
+      return openai(config.model);
+    }
+
     case 'azure': {
-      // Azure OpenAI
       const azure = createAzure({
         apiKey: config.apiKey,
         resourceName: config.azureResourceName!,
         apiVersion: config.azureApiVersion,
       });
-      // Use the deployment name
       return azure(config.azureDeployment || config.model);
     }
 

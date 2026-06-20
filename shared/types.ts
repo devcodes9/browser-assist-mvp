@@ -14,7 +14,24 @@ export type BrowserCommand =
   | ExtractCommand
   | SnapshotCommand
   | DiscoverCommand
-  | ScreenshotCommand;
+  | ScreenshotCommand
+  | GetPageStructureCommand
+  | ExtractTableCommand
+  | ExtractLinksCommand
+  | GetFormFieldsCommand
+  | ScrollToCommand
+  | SearchPageCommand
+  | EvalCommand
+  | WaitForElementCommand
+  | DiscoverAllCommand
+  | GetAppStateCommand
+  | FetchFromPageCommand
+  | ObserveMutationsCommand
+  | GetPageSectionsCommand
+  | ListTabsCommand
+  | SwitchTabCommand
+  | OpenTabCommand
+  | CloseTabCommand;
 
 export interface NavigateCommand {
   type: 'navigate';
@@ -73,6 +90,106 @@ export interface InteractiveElement {
   isInViewport: boolean;
 }
 
+export interface GetPageStructureCommand {
+  type: 'get_page_structure';
+  id: string;
+}
+
+export interface ExtractTableCommand {
+  type: 'extract_table';
+  id: string;
+  selector: string;
+}
+
+export interface ExtractLinksCommand {
+  type: 'extract_links';
+  id: string;
+}
+
+export interface GetFormFieldsCommand {
+  type: 'get_form_fields';
+  id: string;
+}
+
+export interface ScrollToCommand {
+  type: 'scroll_to';
+  id: string;
+  target: string | 'top' | 'bottom';
+}
+
+export interface SearchPageCommand {
+  type: 'search_page';
+  id: string;
+  query: string;
+}
+
+export interface EvalCommand {
+  type: 'eval';
+  id: string;
+  code: string;
+}
+
+export interface WaitForElementCommand {
+  type: 'wait_for_element';
+  id: string;
+  selector: string;
+  timeout: number;
+}
+
+export interface DiscoverAllCommand {
+  type: 'discover_all';
+  id: string;
+}
+
+export interface GetAppStateCommand {
+  type: 'get_app_state';
+  id: string;
+}
+
+export interface FetchFromPageCommand {
+  type: 'fetch_from_page';
+  id: string;
+  url: string;
+  method: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+export interface ObserveMutationsCommand {
+  type: 'observe_mutations';
+  id: string;
+  selector?: string;
+  timeout: number;
+}
+
+export interface GetPageSectionsCommand {
+  type: 'get_page_sections';
+  id: string;
+}
+
+export interface ListTabsCommand {
+  type: 'list_tabs';
+  id: string;
+}
+
+export interface SwitchTabCommand {
+  type: 'switch_tab';
+  id: string;
+  tabId: number;
+}
+
+export interface OpenTabCommand {
+  type: 'open_tab';
+  id: string;
+  url: string;
+}
+
+export interface CloseTabCommand {
+  type: 'close_tab';
+  id: string;
+  tabId: number;
+}
+
 // ============================================================================
 // Command Results
 // ============================================================================
@@ -85,21 +202,24 @@ export interface CommandResult {
 }
 
 // ============================================================================
-// WebSocket Messages (Extension ↔ Backend)
+// WebSocket Messages (Extension <-> Backend)
 // ============================================================================
 
 export type WSMessage =
   | ExtensionReadyMessage
   | UserMessageFromExtension
+  | UserStopMessage
+  | ClientConfigMessage
+  | ConfigStateMessage
   | AgentMessageToExtension
+  | AgentStatusMessage
   | CommandRequestMessage
   | CommandResponseMessage
-  | PermissionRequestMessage
-  | PermissionResponseMessage
-  | PlanRequestMessage
-  | PlanResponseMessage;
+  | ConversationClearMessage
+  | HeartbeatMessage
+  | PongMessage;
 
-// Extension → Backend
+// Extension -> Backend
 export interface ExtensionReadyMessage {
   type: 'extension:ready';
   tabId: number;
@@ -119,14 +239,20 @@ export interface CommandResponseMessage {
   tabId: number;
 }
 
-export interface PermissionResponseMessage {
-  type: 'permission:response';
-  commandId: string;
-  approved: boolean;
+export interface UserStopMessage {
+  type: 'user:stop';
   tabId: number;
 }
 
-// Backend → Extension
+export interface ConversationClearMessage {
+  type: 'conversation:clear';
+}
+
+export interface PongMessage {
+  type: 'pong';
+}
+
+// Backend -> Extension
 export interface AgentMessageToExtension {
   type: 'agent:message';
   content: string;
@@ -134,45 +260,83 @@ export interface AgentMessageToExtension {
   done: boolean;
 }
 
+export interface AgentStatusMessage {
+  type: 'agent:status';
+  status: 'thinking' | 'tool_call' | 'tool_result' | 'idle' | 'error';
+  toolName?: string;
+  toolArgs?: Record<string, unknown>;
+  summary?: string;
+}
+
 export interface CommandRequestMessage {
   type: 'command:request';
   command: BrowserCommand;
 }
 
-export interface PermissionRequestMessage {
-  type: 'permission:request';
-  command: BrowserCommand;
-  description: string;
-}
-
-// Plan approval messages
-export interface PlanRequestMessage {
-  type: 'plan:request';
-  planId: string;
-  plan: string[];  // List of planned actions
-  summary: string; // Brief description
-}
-
-export interface PlanResponseMessage {
-  type: 'plan:response';
-  planId: string;
-  approved: boolean;
-  feedback?: string; // If user wants to modify
+export interface HeartbeatMessage {
+  type: 'heartbeat';
 }
 
 // ============================================================================
 // Agent Configuration
 // ============================================================================
 
+export type AgentProvider = 'anthropic' | 'openai' | 'azure' | 'openai-compatible';
+
 export interface AgentConfig {
-  provider: 'anthropic' | 'openai' | 'azure' | 'custom';
+  provider: AgentProvider;
   model: string;
   apiKey: string;
+  baseURL?: string; // for openai-compatible providers (OpenRouter, Ollama, etc.)
   maxSteps?: number;
-  // Azure-specific configuration
   azureResourceName?: string;
   azureDeployment?: string;
   azureApiVersion?: string;
+}
+
+// ============================================================================
+// Client Config (BYOK + Managed mode)
+// ============================================================================
+
+export type ClientMode = 'byok' | 'managed';
+
+export interface ClientConfig {
+  mode: ClientMode;
+  // BYOK fields
+  provider?: AgentProvider;
+  model?: string;
+  apiKey?: string;
+  baseURL?: string;
+  azureResourceName?: string;
+  azureDeployment?: string;
+  azureApiVersion?: string;
+  // Managed fields
+  licenseKey?: string;
+  managedModel?: string;
+}
+
+export interface ClientConfigMessage {
+  type: 'config:set';
+  config: ClientConfig;
+}
+
+export interface ManagedModelOption {
+  id: string;
+  label: string;
+}
+
+export interface ConfigStateMessage {
+  type: 'config:state';
+  managedAvailable: boolean;
+  managedModels: ManagedModelOption[];
+  byokProviders: AgentProvider[];
+  // Per-client status — last applied config result
+  active?: {
+    mode: ClientMode;
+    provider: AgentProvider;
+    model: string;
+  };
+  error?: string;
 }
 
 // ============================================================================
@@ -196,13 +360,9 @@ export interface MCPConfig {
 
 export interface ChatMessage {
   id: string;
-  role: 'user' | 'agent' | 'system';
+  role: 'user' | 'agent' | 'system' | 'status';
   content: string;
   timestamp: number;
-}
-
-export interface PendingPermission {
-  id: string;
-  command: BrowserCommand;
-  description: string;
+  toolName?: string;
+  status?: 'thinking' | 'tool_call' | 'tool_result' | 'error';
 }

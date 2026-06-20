@@ -91,3 +91,189 @@
     font-size: 14px;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Settings modal (BYOK / Managed) — plain CSS used by Settings.tsx.
+   Toned to the GLD-1 design tokens so it feels native to the side panel.
+   --------------------------------------------------------------------------- */
+@layer components {
+  .settings-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .settings-backdrop {
+    position: absolute;
+    inset: 0;
+    background: hsl(240 10% 3.9% / 0.4);
+    backdrop-filter: blur(2px);
+  }
+
+  .settings-modal {
+    position: relative;
+    background: hsl(var(--card));
+    color: hsl(var(--card-foreground));
+    border: 1px solid hsl(var(--border));
+    border-radius: calc(var(--radius) + 0.25rem);
+    width: 92%;
+    max-width: 460px;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow:
+      0 20px 25px -5px hsl(240 10% 3.9% / 0.1),
+      0 10px 10px -5px hsl(240 10% 3.9% / 0.04);
+    padding: 20px;
+  }
+
+  .settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+
+  .settings-header h3 {
+    font-size: 16px;
+    font-weight: 600;
+    color: hsl(var(--foreground));
+  }
+
+  .settings-close {
+    background: transparent;
+    border: none;
+    font-size: 20px;
+    color: hsl(var(--muted-foreground));
+    cursor: pointer;
+    line-height: 1;
+  }
+
+  .settings-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 14px;
+    background: hsl(var(--muted));
+    border-radius: var(--radius);
+    padding: 4px;
+  }
+
+  .settings-tab {
+    flex: 1;
+    background: transparent;
+    border: none;
+    padding: 6px 10px;
+    font-size: 13px;
+    color: hsl(var(--muted-foreground));
+    cursor: pointer;
+    border-radius: calc(var(--radius) - 0.25rem);
+  }
+
+  .settings-tab.active {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    box-shadow: 0 1px 2px hsl(240 10% 3.9% / 0.06);
+  }
+
+  .settings-tab:disabled {
+    color: hsl(var(--muted-foreground) / 0.6);
+    cursor: not-allowed;
+  }
+
+  .settings-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: hsl(var(--muted-foreground));
+  }
+
+  .settings-field span {
+    font-weight: 500;
+    color: hsl(var(--foreground));
+  }
+
+  .settings-field input,
+  .settings-field select {
+    padding: 8px 10px;
+    border: 1px solid hsl(var(--input));
+    border-radius: calc(var(--radius) - 0.25rem);
+    font-size: 13px;
+    font-family: inherit;
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+    outline: none;
+  }
+
+  .settings-field input:focus,
+  .settings-field select:focus {
+    border-color: hsl(var(--ring));
+    box-shadow: 0 0 0 2px hsl(var(--ring) / 0.15);
+  }
+
+  .settings-hint {
+    font-size: 11px;
+    color: hsl(var(--muted-foreground));
+    line-height: 1.4;
+  }
+
+  .settings-warn {
+    color: hsl(38 92% 30%);
+    background: hsl(48 100% 96%);
+    border-left: 3px solid hsl(38 92% 50%);
+    padding: 8px 10px;
+    border-radius: 4px;
+  }
+
+  .settings-error {
+    background: hsl(0 86% 97%);
+    color: hsl(0 72% 41%);
+    border-left: 3px solid hsl(var(--destructive));
+    padding: 8px 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    margin-bottom: 12px;
+  }
+
+  .settings-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 16px;
+  }
+
+  .settings-cancel,
+  .settings-save {
+    padding: 8px 16px;
+    border: none;
+    border-radius: calc(var(--radius) - 0.25rem);
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  .settings-cancel {
+    background: hsl(var(--secondary));
+    color: hsl(var(--secondary-foreground));
+  }
+
+  .settings-cancel:hover {
+    background: hsl(var(--accent));
+  }
+
+  .settings-save {
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+  }
+
+  .settings-save:hover {
+    background: hsl(var(--primary) / 0.9);
+  }
+}

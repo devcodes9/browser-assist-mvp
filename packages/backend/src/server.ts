@@ -4,11 +4,15 @@
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
-import type { WSMessage, UserMessageFromExtension } from './types.js';
+import type { WSMessage, UserMessageFromExtension, ClientConfig } from './types.js';
 import { createAgent } from './agent.js';
-import { loadConfig } from './config.js';
+import { resolveClientConfig, getServerCapabilities, ConfigError } from './config.js';
 
 const PORT = process.env.PORT ? parseInt(process.env.PORT) : 8080;
+const HEARTBEAT_INTERVAL = 30_000;
+const PONG_TIMEOUT = 10_000;
+const MAX_CONVERSATION_MESSAGES = 20;
+const MAX_RUN_MS = process.env.MAX_RUN_MS ? parseInt(process.env.MAX_RUN_MS) : 180_000;
 
 // Server state
 const clients = new Map<WebSocket, ClientState>();
@@ -21,24 +25,71 @@ interface ConversationMessage {
 interface ClientState {
   tabId: number | null;
   agent: ReturnType<typeof createAgent> | null;
+  abortController: AbortController | null;
+  abortReason: 'user' | 'budget' | null;
   conversationHistory: ConversationMessage[];
-  planApproved: boolean; // When true, all actions auto-approve
+  clientConfig: ClientConfig | null;
+  isAlive: boolean;
+  isProcessing: boolean;
 }
 
 // Initialize WebSocket server
 const wss = new WebSocketServer({ port: PORT });
 
-console.log(`🚀 WebSocket server started on ws://localhost:${PORT}`);
+console.log(`WebSocket server started on ws://localhost:${PORT}`);
+
+// Heartbeat: ping all clients every 30s, terminate if no pong
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws) => {
+    const state = clients.get(ws);
+    if (!state) return;
+
+    if (!state.isAlive) {
+      console.log('Client failed heartbeat, terminating');
+      clients.delete(ws);
+      ws.terminate();
+      return;
+    }
+
+    state.isAlive = false;
+    send(ws, { type: 'heartbeat' });
+
+    // If no pong within timeout, mark dead
+    setTimeout(() => {
+      const s = clients.get(ws);
+      if (s && !s.isAlive) {
+        // Will be cleaned up next heartbeat cycle
+      }
+    }, PONG_TIMEOUT);
+  });
+}, HEARTBEAT_INTERVAL);
+
+wss.on('close', () => {
+  clearInterval(heartbeatInterval);
+});
 
 wss.on('connection', (ws) => {
-  console.log('📱 Extension connected');
+  console.log('Extension connected');
 
   // Initialize client state
   clients.set(ws, {
     tabId: null,
     agent: null,
+    abortController: null,
+    abortReason: null,
     conversationHistory: [],
-    planApproved: false,
+    clientConfig: null,
+    isAlive: true,
+    isProcessing: false,
+  });
+
+  // Announce server capabilities (BYOK providers, managed availability/models)
+  const caps = getServerCapabilities();
+  send(ws, {
+    type: 'config:state',
+    managedAvailable: caps.managedAvailable,
+    managedModels: caps.managedModels,
+    byokProviders: caps.byokProviders,
   });
 
   ws.on('message', async (data) => {
@@ -52,7 +103,9 @@ wss.on('connection', (ws) => {
   });
 
   ws.on('close', () => {
-    console.log('📱 Extension disconnected');
+    console.log('Extension disconnected');
+    const state = clients.get(ws);
+    state?.abortController?.abort();
     clients.delete(ws);
   });
 
@@ -63,56 +116,75 @@ wss.on('connection', (ws) => {
 
 // Handle incoming messages
 async function handleMessage(ws: WebSocket, message: WSMessage) {
-  console.log('📨 Received:', message.type);
-
   const state = clients.get(ws);
   if (!state) return;
 
   switch (message.type) {
     case 'extension:ready':
       state.tabId = message.tabId;
-      console.log(`✓ Extension ready (tab: ${message.tabId})`);
+      console.log(`Extension ready (tab: ${message.tabId})`);
       break;
 
     case 'user:message':
       await handleUserMessage(ws, message);
       break;
 
+    case 'user:stop':
+      if (state.abortController) {
+        console.log('User stop requested');
+        state.abortReason = 'user';
+        state.abortController.abort();
+      }
+      break;
+
+    case 'config:set':
+      state.clientConfig = message.config;
+      // Try resolving so the client gets immediate validation feedback
+      try {
+        const resolved = resolveClientConfig(message.config);
+        const caps = getServerCapabilities();
+        send(ws, {
+          type: 'config:state',
+          managedAvailable: caps.managedAvailable,
+          managedModels: caps.managedModels,
+          byokProviders: caps.byokProviders,
+          active: {
+            mode: message.config.mode,
+            provider: resolved.provider,
+            model: resolved.model,
+          },
+        });
+      } catch (error) {
+        const caps = getServerCapabilities();
+        send(ws, {
+          type: 'config:state',
+          managedAvailable: caps.managedAvailable,
+          managedModels: caps.managedModels,
+          byokProviders: caps.byokProviders,
+          error: error instanceof ConfigError ? error.message : 'Invalid config',
+        });
+      }
+      break;
+
     case 'command:response':
-      // Command response from extension
-      // Agent will handle this via pending promises
       if (state.agent) {
         state.agent.handleCommandResponse(message.result);
       }
       break;
 
-    case 'permission:response':
-      // Permission response from user
-      if (state.agent) {
-        state.agent.handlePermissionResponse(
-          message.commandId,
-          message.approved
-        );
-      }
+    case 'conversation:clear':
+      state.conversationHistory = [];
+      state.abortController?.abort();
+      console.log('Conversation cleared');
       break;
 
-    case 'plan:response':
-      // Plan approval response from user
-      if (state.agent) {
-        state.agent.handlePlanResponse(
-          message.planId,
-          message.approved,
-          message.feedback
-        );
-        if (message.approved) {
-          state.planApproved = true;
-          console.log('✓ Plan approved - subsequent actions will auto-execute');
-        }
-      }
+    case 'pong':
+      state.isAlive = true;
       break;
 
     default:
-      console.warn('Unknown message type:', message);
+      // Ignore unknown message types silently
+      break;
   }
 }
 
@@ -120,6 +192,21 @@ async function handleMessage(ws: WebSocket, message: WSMessage) {
 async function handleUserMessage(ws: WebSocket, message: UserMessageFromExtension) {
   const state = clients.get(ws);
   if (!state) return;
+
+  // Prevent concurrent agent runs
+  if (state.isProcessing) {
+    sendError(ws, 'Agent is still processing the previous request. Please wait.');
+    return;
+  }
+
+  // Resolve config now so we fail fast with a clear error instead of crashing the run
+  let resolvedConfig;
+  try {
+    resolvedConfig = resolveClientConfig(state.clientConfig);
+  } catch (error) {
+    sendError(ws, error instanceof ConfigError ? error.message : 'Invalid model configuration');
+    return;
+  }
 
   // Build user message with page context
   const pageContext = message.pageUrl
@@ -133,15 +220,32 @@ async function handleUserMessage(ws: WebSocket, message: UserMessageFromExtensio
     content: userMessageWithContext,
   });
 
-  try {
-    // Load configuration
-    const config = loadConfig();
+  // Trim conversation to sliding window
+  if (state.conversationHistory.length > MAX_CONVERSATION_MESSAGES) {
+    state.conversationHistory = state.conversationHistory.slice(
+      -MAX_CONVERSATION_MESSAGES
+    );
+  }
 
-    // Create agent instance for this session
+  state.isProcessing = true;
+  const abortController = new AbortController();
+  state.abortController = abortController;
+  state.abortReason = null;
+
+  // Wall-clock budget: abort runaway runs even if the user doesn't hit Stop.
+  const budgetTimer = setTimeout(() => {
+    if (!abortController.signal.aborted) {
+      console.log(`Run exceeded ${MAX_RUN_MS}ms budget, aborting`);
+      state.abortReason = 'budget';
+      abortController.abort();
+    }
+  }, MAX_RUN_MS);
+
+  try {
     const agent = createAgent({
-      config,
-      conversationHistory: state.conversationHistory,
-      isPlanApproved: () => state.planApproved,
+      config: resolvedConfig,
+      conversationHistory: state.conversationHistory.slice(0, -1), // Exclude current message (passed separately)
+      abortSignal: abortController.signal,
       onMessage: (content, streaming = false, done = false) => {
         send(ws, {
           type: 'agent:message',
@@ -149,7 +253,6 @@ async function handleUserMessage(ws: WebSocket, message: UserMessageFromExtensio
           streaming,
           done,
         });
-        // Add assistant response to history when done
         if (done && content) {
           state.conversationHistory.push({
             role: 'assistant',
@@ -157,38 +260,48 @@ async function handleUserMessage(ws: WebSocket, message: UserMessageFromExtensio
           });
         }
       },
+      onStatus: (status, toolName, toolArgs, summary) => {
+        send(ws, {
+          type: 'agent:status',
+          status,
+          toolName,
+          toolArgs,
+          summary,
+        });
+      },
       onCommandRequest: (command) => {
         send(ws, {
           type: 'command:request',
           command,
         });
       },
-      onPermissionRequest: (command, description) => {
-        send(ws, {
-          type: 'permission:request',
-          command,
-          description,
-        });
-      },
-      onPlanRequest: (plan) => {
-        send(ws, {
-          type: 'plan:request',
-          ...plan,
-        });
-      },
     });
 
     state.agent = agent;
 
-    // Run agent with user message (including page context)
+    // Send thinking status
+    send(ws, { type: 'agent:status', status: 'thinking' });
+
     await agent.run(userMessageWithContext);
 
-    console.log('✓ Agent completed');
+    if (abortController.signal.aborted) {
+      const content = state.abortReason === 'budget'
+        ? `Stopped: run exceeded ${Math.round(MAX_RUN_MS / 1000)}s budget. Send a more specific instruction or break the task into smaller steps.`
+        : 'Stopped.';
+      send(ws, { type: 'agent:message', content, streaming: false, done: true });
+    }
+
+    send(ws, { type: 'agent:status', status: 'idle' });
   } catch (error) {
     console.error('Agent error:', error);
+    send(ws, { type: 'agent:status', status: 'error', summary: error instanceof Error ? error.message : 'Agent failed' });
     sendError(ws, error instanceof Error ? error.message : 'Agent failed');
   } finally {
+    clearTimeout(budgetTimer);
     state.agent = null;
+    state.abortController = null;
+    state.abortReason = null;
+    state.isProcessing = false;
   }
 }
 
@@ -211,14 +324,16 @@ function sendError(ws: WebSocket, error: string) {
 
 // Graceful shutdown
 process.on('SIGINT', () => {
-  console.log('\n👋 Shutting down...');
+  console.log('\nShutting down...');
+  clearInterval(heartbeatInterval);
   wss.close(() => {
     process.exit(0);
   });
 });
 
 process.on('SIGTERM', () => {
-  console.log('\n👋 Shutting down...');
+  console.log('\nShutting down...');
+  clearInterval(heartbeatInterval);
   wss.close(() => {
     process.exit(0);
   });

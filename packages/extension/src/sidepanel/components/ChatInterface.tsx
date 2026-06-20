@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Sparkles, ArrowUp, User } from 'lucide-react';
+import { Sparkles, ArrowUp, Square, User } from 'lucide-react';
 import type { ChatMessage } from '@shared/types';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -8,7 +8,10 @@ import { cn } from '@/lib/utils';
 interface ChatInterfaceProps {
   messages: ChatMessage[];
   onSendMessage: (content: string) => void;
+  onStop?: () => void;
   disabled?: boolean;
+  isProcessing?: boolean;
+  currentToolCall?: string | null;
 }
 
 const SUGGESTIONS = [
@@ -21,7 +24,10 @@ const SUGGESTIONS = [
 export default function ChatInterface({
   messages,
   onSendMessage,
+  onStop,
   disabled = false,
+  isProcessing = false,
+  currentToolCall = null,
 }: ChatInterfaceProps) {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -29,11 +35,11 @@ export default function ChatInterface({
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, isProcessing, currentToolCall]);
 
   const send = () => {
     const value = input.trim();
-    if (!value || disabled) return;
+    if (!value || disabled || isProcessing) return;
     onSendMessage(value);
     setInput('');
   };
@@ -51,7 +57,7 @@ export default function ChatInterface({
   };
 
   const fillSuggestion = (text: string) => {
-    if (disabled) return;
+    if (disabled || isProcessing) return;
     setInput(text);
   };
 
@@ -75,7 +81,7 @@ export default function ChatInterface({
                 <button
                   key={s}
                   type="button"
-                  disabled={disabled}
+                  disabled={disabled || isProcessing}
                   onClick={() => fillSuggestion(s)}
                   className="rounded-full border border-border bg-background px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-accent disabled:pointer-events-none disabled:opacity-50"
                 >
@@ -89,6 +95,7 @@ export default function ChatInterface({
             {messages.map((message) => (
               <MessageRow key={message.id} message={message} />
             ))}
+            {isProcessing && <ThinkingIndicator label={currentToolCall} />}
           </div>
         )}
         <div ref={messagesEndRef} />
@@ -104,28 +111,60 @@ export default function ChatInterface({
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder={
-              disabled ? 'Connecting...' : 'Ask Browser Assist to act on this page'
+              disabled
+                ? 'Connecting...'
+                : isProcessing
+                  ? 'Agent is working — press Stop to interrupt'
+                  : 'Ask Browser Assist to act on this page'
             }
-            disabled={disabled}
+            disabled={disabled || isProcessing}
             rows={1}
             className="max-h-24 px-3.5 pb-1 pt-3"
           />
           <div className="flex items-center px-2 pb-2 pt-1">
             <span className="px-1 text-[10.5px] text-muted-foreground">
-              Enter to send
+              {isProcessing ? 'Working…' : 'Enter to send'}
             </span>
-            <Button
-              type="submit"
-              size="round"
-              disabled={disabled || !input.trim()}
-              aria-label="Send"
-              className="ml-auto"
-            >
-              <ArrowUp />
-            </Button>
+            {isProcessing ? (
+              <Button
+                type="button"
+                size="round"
+                variant="destructive"
+                onClick={onStop}
+                disabled={!onStop}
+                aria-label="Stop"
+                title="Stop the agent"
+                className="ml-auto"
+              >
+                <Square />
+              </Button>
+            ) : (
+              <Button
+                type="submit"
+                size="round"
+                disabled={disabled || !input.trim()}
+                aria-label="Send"
+                className="ml-auto"
+              >
+                <ArrowUp />
+              </Button>
+            )}
           </div>
         </form>
       </div>
+    </div>
+  );
+}
+
+function ThinkingIndicator({ label }: { label?: string | null }) {
+  return (
+    <div className="flex items-center gap-2 px-1 text-[12.5px] text-muted-foreground">
+      <span className="flex gap-1" aria-hidden>
+        <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.3s]" />
+        <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/70 [animation-delay:-0.15s]" />
+        <span className="size-1.5 animate-bounce rounded-full bg-muted-foreground/70" />
+      </span>
+      <span className="truncate">{label || 'Thinking…'}</span>
     </div>
   );
 }
@@ -135,6 +174,15 @@ function MessageRow({ message }: { message: ChatMessage }) {
     return (
       <div className="px-1 py-0.5 text-center text-xs italic text-muted-foreground">
         {message.content}
+      </div>
+    );
+  }
+
+  if (message.role === 'status') {
+    return (
+      <div className="flex items-center gap-2 self-start rounded-full border border-border bg-muted px-2.5 py-1 text-[11.5px] text-muted-foreground">
+        <span className="size-1.5 rounded-full bg-muted-foreground/70" aria-hidden />
+        <span className="truncate">{message.content}</span>
       </div>
     );
   }
