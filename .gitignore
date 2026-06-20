@@ -38,3 +38,6 @@ packages/extension/build/
 
 # Review/QA screenshots are PR artifacts, not source — keep them out of the repo
 packages/extension/docs/screenshots/
+
+# Guildly orchestration artifacts (machine-local paths, not project source)
+.guildly/
